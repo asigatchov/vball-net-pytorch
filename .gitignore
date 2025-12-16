@@ -1,0 +1,8 @@
+/datasets/*
+!/datasets/.keep
+/.venv/
+/outputs
+/tmp/
+__pycache__/
+
+
