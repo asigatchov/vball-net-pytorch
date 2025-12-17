@@ -48,6 +48,7 @@ from utils.tracknet_datasetv2 import FrameHeatmapDataset
 import os
 import numpy as np
 import cv2
+from torch.utils.tensorboard import SummaryWriter  # Add TensorBoard import
 
 # Choose the version of TrackNet model you want to use
 from model.vballnet_v1a import VballNetV1a as VballNetV1a
@@ -60,7 +61,7 @@ from model.vballnet_v1c import VballNetV1c
 from model.vballnetfast_v1 import VballNetFastV1  # Import the fast version
 from model.vballnetfast_v2 import VballNetFastV2  # Import the fast version
 # Available models
-AVAILABLE_MODELS = ["TrackNet", "VballNetV2", "VballNetV3b", "VballNetV3c", "VballNetV3", "VballNetV1a", "VballNetV1c", "VballNetV1d", "VballNetFastV1", "VballNetFastV2"]
+AVAILABLE_MODELS = ["TrackNet", "VballNetV2", "VballNetV3b", "VballNetV3c", "VballNetV3", "VballNetV1a", "VballNetV1c", "VballNetFastV1", "VballNetFastV2"]
 
 
 def parse_args():
@@ -151,7 +152,10 @@ class Trainer:
         self._setup_dirs()
         self._load_checkpoint()
         self.losses = {"batch": [], "steps": [], "lrs": [], "train": [], "val": []}
+        self.val_metrics = []  # Add this line to store validation metrics
         self.step = 0
+        # Initialize TensorBoard writer
+        self.writer = SummaryWriter(log_dir=self.save_dir / "tensorboard")
         signal.signal(signal.SIGINT, self._interrupt)
         signal.signal(signal.SIGTERM, self._interrupt)
 
@@ -175,6 +179,7 @@ class Trainer:
         self.save_dir.mkdir(parents=True, exist_ok=True)
         (self.save_dir / "checkpoints").mkdir(exist_ok=True)
         (self.save_dir / "plots").mkdir(exist_ok=True)
+        (self.save_dir / "tensorboard").mkdir(exist_ok=True)  # Create tensorboard directory
         with open(self.save_dir / "config.json", "w") as f:
             json.dump(vars(self.args), f, indent=2)
         print(f"Output directory created: {self.save_dir}")
@@ -318,34 +323,33 @@ class Trainer:
         }
 
         if self.args.model_name == "TrackNet":
-            self.model = TrackNet().to(self.device)
+            # Use VballNetV1a as TrackNet
+            self.model = VballNetV1a(**model_params).to(self.device)
+            setattr(self.model, '_model_type', "VballNetV1a")
+
         elif self.args.model_name == "VballNetV1a":
             self.model = VballNetV1a(**model_params).to(self.device)
-            self.model._model_type = "VballNetV1a"
+            setattr(self.model, '_model_type', "VballNetV1a")
 
-        elif 'VballNetV1d' in self.args.model_name:
-            self.model = VballNetV1d(**model_params).to(self.device)
-            self.model._model_type = "VballNetV1d"
-        
         elif self.args.model_name == "VballNetV2":
             self.model = VballNetV2(**model_params).to(self.device)
-            self.model._model_type = "VballNetV2"
+            setattr(self.model, '_model_type', "VballNetV2")
             
         elif self.args.model_name == "VballNetV3b":
             self.model = VballNetV3b(**model_params).to(self.device)
-            self.model._model_type = "VballNetV3b"
+            setattr(self.model, '_model_type', "VballNetV3b")
 
         elif self.args.model_name == "VballNetV3c":
             self.model = VballNetV3c(**model_params).to(self.device)
-            self.model._model_type = "VballNetV3c"
+            setattr(self.model, '_model_type', "VballNetV3c")
 
         elif 'VballNetV3' in self.args.model_name:
             self.model = VballNetV3(**model_params).to(self.device)
-            self.model._model_type = "VballNetV3"
+            setattr(self.model, '_model_type', "VballNetV3")
 
         elif self.args.model_name == "VballNetV1c":
             self.model = VballNetV1c(**model_params).to(self.device)
-            self.model._model_type = "VballNetV1c"
+            setattr(self.model, '_model_type', "VballNetV1c")
             
         elif self.args.model_name == "VballNetFastV1":
             self.model = VballNetFastV1(
@@ -354,7 +358,7 @@ class Trainer:
                 in_dim=in_dim,
                 out_dim=out_dim
             ).to(self.device)
-            self.model._model_type = "VballNetFastV1"
+            setattr(self.model, '_model_type', "VballNetFastV1")
             
         elif self.args.model_name == "VballNetFastV2":
             self.model = VballNetFastV2(
@@ -363,7 +367,7 @@ class Trainer:
                 in_dim=in_dim,
                 out_dim=out_dim
             ).to(self.device)
-            self.model._model_type = "VballNetFastV2"
+            setattr(self.model, '_model_type', "VballNetFastV2")
 
         else:
             raise ValueError(f"Unknown model: {self.args.model_name}")
@@ -427,8 +431,8 @@ class Trainer:
     def plot_curves(self, epoch):
         print("Generating training plots...")
 
-        # Create a single figure with three subplots in a row
-        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 4))
+        # Create a single figure with four subplots in a row
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
 
         # Plot 1: Train and Val Loss
         if self.losses["train"]:
@@ -467,6 +471,24 @@ class Trainer:
             ax3.set_yscale("log")
             ax3.grid(True, alpha=0.3)
 
+        # Plot 4: Validation Metrics (F1 and Accuracy)
+        if self.val_metrics:
+            epochs = list(range(1, len(self.val_metrics) + 1))
+            center_f1 = [m['center_f1'] for m in self.val_metrics]
+            center_acc = [m['center_acc'] for m in self.val_metrics]
+            all_f1 = [m['all_f1'] for m in self.val_metrics]
+            all_acc = [m['all_acc'] for m in self.val_metrics]
+            
+            ax4.plot(epochs, center_f1, "b-", label="Center Frame F1")
+            ax4.plot(epochs, center_acc, "b--", label="Center Frame Acc")
+            ax4.plot(epochs, all_f1, "r-", label="All Frames F1")
+            ax4.plot(epochs, all_acc, "r--", label="All Frames Acc")
+            ax4.set_xlabel("Epoch")
+            ax4.set_ylabel("Metric Value")
+            ax4.set_title("Validation Metrics")
+            ax4.legend()
+            ax4.grid(True, alpha=0.3)
+
         # Adjust layout to prevent overlap
         plt.tight_layout()
 
@@ -484,6 +506,11 @@ class Trainer:
         print("Starting validation...")
         self.model.eval()
         total_loss = 0.0
+        # Initialize variables for metrics calculation
+        total_f1_center = 0.0
+        total_acc_center = 0.0
+        total_f1_all = 0.0
+        total_acc_all = 0.0
         vis_dir = self.save_dir / "val_vis"
 
         vis_dir.mkdir(exist_ok=True)
@@ -519,6 +546,16 @@ class Trainer:
                 loss = self.criterion(outputs, targets)
                 total_loss += loss.item()
 
+                # Calculate metrics for the central frame (previous incorrect call)
+                batch_f1_center, batch_acc_center = self._calculate_metrics(outputs, targets, mode="center")
+                total_f1_center += float(batch_f1_center)
+                total_acc_center += float(batch_acc_center)
+
+                # Для анализа качества последовательности — считаем по всем
+                batch_f1_all, batch_acc_all = self._calculate_metrics(outputs, targets, mode="all")
+                total_f1_all += float(batch_f1_all)
+                total_acc_all += float(batch_acc_all)
+
                 # --- Визуализация ---
                 if batch_idx < max_vis_batches:
                     # inputs: (B, C, H, W), outputs: (B, seq, H, W), targets: (B, seq, H, W)
@@ -526,7 +563,7 @@ class Trainer:
                     pred = outputs[0].detach().cpu()  # (seq, H, W)
                     gt = targets[0].detach().cpu()   # (seq, H, W)
                     # Определяем число кадров для визуализации
-                    n_vis = min(pred.shape[0], gt.shape[0], 9)
+                    n_vis = min(pred.shape[0], gt.shape[0], self.args.seq)
                     for i in range(n_vis):
                         # Входной кадр (если grayscale - берем 1 канал, если RGB - 3)
                         if inp.shape[0] == pred.shape[0]:
@@ -561,8 +598,97 @@ class Trainer:
             val_pbar.close()
 
         avg_loss = total_loss / len(self.val_loader)
+        avg_f1_center = total_f1_center / len(self.val_loader)
+        avg_acc_center = total_acc_center / len(self.val_loader)
+        avg_f1_all = total_f1_all / len(self.val_loader)
+        avg_acc_all = total_acc_all / len(self.val_loader)
+        
         print(f"Validation completed - Average loss: \033[94m{avg_loss:.6f}\033[0m")
-        return avg_loss
+        print(f"Central Frame - F1 Score: \033[94m{avg_f1_center:.6f}\033[0m, Accuracy (dist ≤ 10px): \033[94m{avg_acc_center:.6f}\033[0m")
+        print(f"All Frames - F1 Score: \033[94m{avg_f1_all:.6f}\033[0m, Accuracy (dist ≤ 10px): \033[94m{avg_acc_all:.6f}\033[0m")
+        
+        # Return all metrics for plotting
+        return avg_loss, avg_f1_center, avg_acc_center, avg_f1_all, avg_acc_all
+
+    def _find_positions(self, heatmaps):
+        """
+        Find the position of maximum activation in each heatmap.
+        
+        Args:
+            heatmaps: Tensor of shape (B, H*W)
+            
+        Returns:
+            positions: Tensor of shape (B, 2) with (x, y) coordinates
+        """
+        batch_size, flat_dim = heatmaps.shape
+        H, W = 288, 512  # Fixed dimensions from dataset
+        
+        # Get indices of maximum values
+        max_indices = torch.argmax(heatmaps, dim=1)  # (B,)
+        
+        # Convert flat indices to (y, x) coordinates
+        y_coords = (max_indices // W).float()
+        x_coords = (max_indices % W).float()
+        
+        # Return as (x, y) coordinates
+        return torch.stack([x_coords, y_coords], dim=1)  # (B, 2)
+
+    def _calculate_metrics(self, predictions, targets, mode="both"):
+        """
+        mode: "center" — только центральный кадр (текущий режим)
+            "all"     — по всем кадрам последовательности
+            "both"    — возвращает оба
+        """
+        batch_size = predictions.size(0)
+        seq_len = predictions.size(1)
+
+        f1_scores = []
+        acc_scores = []
+
+        # Определяем индексы для расчёта
+        if mode == "center":
+            indices = [seq_len // 2]
+        elif mode == "all":
+            indices = list(range(seq_len))
+        elif mode == "both":
+            indices = [seq_len // 2] + list(range(seq_len))
+        else:
+            raise ValueError("mode must be center/all/both")
+
+        for idx in indices:
+            pred_frame = predictions[:, idx, :, :]   # (B, H, W)
+            target_frame = targets[:, idx, :, :]
+
+            pred_flat = pred_frame.view(batch_size, -1)
+            target_flat = target_frame.view(batch_size, -1)
+
+            # F1 @ 0.5
+            pred_binary = (pred_flat > 0.5).float()
+            target_binary = (target_flat > 0.5).float()
+            tp = (pred_binary * target_binary).sum(dim=1)
+            fp = (pred_binary * (1 - target_binary)).sum(dim=1)
+            fn = ((1 - pred_binary) * target_binary).sum(dim=1)
+            precision = tp / (tp + fp + 1e-7)
+            recall = tp / (tp + fn + 1e-7)
+            f1 = 2 * (precision * recall) / (precision + recall + 1e-7)
+            f1_scores.append(f1.mean().item())
+
+            # Accuracy ≤10px
+            pred_pos = self._find_positions(pred_flat)
+            target_pos = self._find_positions(target_flat)
+            dist = torch.sqrt(((pred_pos - target_pos) ** 2).sum(dim=1))
+            acc = (dist <= 10).float().mean().item()
+            acc_scores.append(acc)
+
+        if mode == "both":
+            return {
+                "center_f1": f1_scores[0],
+                "center_acc": acc_scores[0],
+                "all_f1": np.mean(f1_scores[1:]),
+                "all_acc": np.mean(acc_scores[1:])
+            }
+        else:
+            return np.mean(f1_scores), np.mean(acc_scores)
 
     def train(self):
         print(f"Starting training on \033[93m{self.device}\033[0m")
@@ -586,7 +712,7 @@ class Trainer:
                 if self.interrupted:
                     train_pbar.close()
                     print("Emergency save triggered...")
-                    val_loss = self.validate()
+                    val_loss, val_f1, val_accuracy, val_f1_all, val_acc_all = self.validate()
                     self.save_checkpoint(
                         epoch, total_loss / (batch_idx + 1), val_loss, True
                     )
@@ -641,7 +767,15 @@ class Trainer:
             train_pbar.close()
 
             train_loss = total_loss / len(self.train_loader)
-            val_loss = self.validate()
+            val_loss, val_f1, val_accuracy, val_f1_all, val_acc_all = self.validate()
+
+            # Collect validation metrics for plotting
+            self.val_metrics.append({
+                'center_f1': val_f1,
+                'center_acc': val_accuracy,
+                'all_f1': val_f1_all,
+                'all_acc': val_acc_all
+            })
 
             self.losses["train"].append(train_loss)
             self.losses["val"].append(val_loss)
@@ -653,6 +787,19 @@ class Trainer:
                 f"Epoch [\033[95m{epoch + 1}\033[0m/\033[95m{self.args.epochs}\033[0m] Train: \033[94m{train_loss:.6f}\033[0m Val: \033[94m{val_loss:.6f}\033[0m "
                 f"LR: \033[94m{current_lr:.6e}\033[0m Time: \033[94m{elapsed:.1f}s\033[0m"
             )
+
+            # Log metrics to TensorBoard
+            self.writer.add_scalar('Loss/Train', train_loss, epoch)
+            self.writer.add_scalar('Loss/Validation', val_loss, epoch)
+            self.writer.add_scalar('Metrics/F1_Score', val_f1, epoch)
+            self.writer.add_scalar('Metrics/Accuracy_10px', val_accuracy, epoch)
+            self.writer.add_scalar('Learning_Rate', current_lr, epoch)
+
+            # В train() после validate()
+            self.writer.add_scalar('Metrics/Center_F1', val_f1, epoch)
+            self.writer.add_scalar('Metrics/Center_Accuracy_10px', val_accuracy, epoch)
+            self.writer.add_scalar('Metrics/All_F1', val_f1_all, epoch)
+            self.writer.add_scalar('Metrics/All_Accuracy_10px', val_acc_all, epoch)
 
             if self.scheduler:
                 print("Updating learning rate scheduler...")
@@ -667,6 +814,8 @@ class Trainer:
         if not self.interrupted:
             print("\n\033[92mTraining completed successfully!\033[0m")
             print(f"\033[92mAll results saved to: {self.save_dir}\033[0m")
+            # Close TensorBoard writer
+            self.writer.close()
 
 
 if __name__ == "__main__":
