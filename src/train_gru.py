@@ -433,6 +433,12 @@ class Trainer:
 
         # Create a single figure with enhanced subplot layout
         fig = plt.figure(figsize=(20, 15))
+        
+        # Create subplots - 2 rows, 2 columns
+        ax1 = plt.subplot(2, 2, 1)  # Train/Val Loss
+        ax2 = plt.subplot(2, 2, 2)  # Batch Loss
+        ax3 = plt.subplot(2, 2, 3)  # Learning Rate
+        ax4 = plt.subplot(2, 2, 4)  # Validation Metrics
 
         # Plot 1: Train and Val Loss
         if self.losses["train"]:
