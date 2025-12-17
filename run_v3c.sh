@@ -12,15 +12,14 @@ VAL_DATADIR=../TrackNetV4-PyTorch/datasets/mix_volleyball_test_preprocessed
 uv run  src/train_gru.py \
   --data "$DATADIR" \
   --val_data "$VAL_DATADIR" \
-  --model_name VballNetV1c \
+  --model_name VballNetV3c \
   --seq 15 \
   --grayscale \
   --optimizer AdamW \
   --lr 0.001 \
   --epochs 200 \
-  --batch 20  \
+  --batch 12  \
   --scheduler ReduceLROnPlateau \
-  --workers 16 \
-  --resume ./outputs/exp_VballNetV1c_seq15_grayscale_20251216_143819/checkpoints/VballNetV1c_seq15_grayscale_best.pth
+  --workers 16    --resume outputs/VballNetV3c_seq15_grayscale_20251217_162939/checkpoints/VballNetV3c_seq15_grayscale_best.pth
 
 echo "Training completed!"

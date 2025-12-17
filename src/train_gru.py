@@ -431,8 +431,8 @@ class Trainer:
     def plot_curves(self, epoch):
         print("Generating training plots...")
 
-        # Create a single figure with four subplots in a row
-        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
+        # Create a single figure with enhanced subplot layout
+        fig = plt.figure(figsize=(20, 15))
 
         # Plot 1: Train and Val Loss
         if self.losses["train"]:
@@ -791,15 +791,13 @@ class Trainer:
             # Log metrics to TensorBoard
             self.writer.add_scalar('Loss/Train', train_loss, epoch)
             self.writer.add_scalar('Loss/Validation', val_loss, epoch)
-            self.writer.add_scalar('Metrics/F1_Score', val_f1, epoch)
-            self.writer.add_scalar('Metrics/Accuracy_10px', val_accuracy, epoch)
+            self.writer.add_scalar('Metrics_Comparison/F1_Score', val_f1, epoch)
+            self.writer.add_scalar('Metrics_Comparison/Accuracy_10px', val_accuracy, epoch)
             self.writer.add_scalar('Learning_Rate', current_lr, epoch)
 
-            # В train() после validate()
-            self.writer.add_scalar('Metrics/Center_F1', val_f1, epoch)
-            self.writer.add_scalar('Metrics/Center_Accuracy_10px', val_accuracy, epoch)
-            self.writer.add_scalar('Metrics/All_F1', val_f1_all, epoch)
-            self.writer.add_scalar('Metrics/All_Accuracy_10px', val_acc_all, epoch)
+            # Log combined metrics to TensorBoard
+            self.writer.add_scalars('F1 Scores', {'Center': val_f1, 'All Frames': val_f1_all}, epoch)
+            self.writer.add_scalars('Accuracy Scores', {'Center': val_accuracy, 'All Frames': val_acc_all}, epoch)
 
             if self.scheduler:
                 print("Updating learning rate scheduler...")
