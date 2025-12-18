@@ -58,10 +58,11 @@ from model.vballnet_v3 import VballNetV3
 from model.vballnet_v3b import VballNetV3b
 from model.vballnet_v3c import VballNetV3c
 from model.vballnet_v1c import VballNetV1c
+from model.vballnet_v1b import VballNetV1b
 from model.vballnetfast_v1 import VballNetFastV1  # Import the fast version
 from model.vballnetfast_v2 import VballNetFastV2  # Import the fast version
 # Available models
-AVAILABLE_MODELS = ["TrackNet", "VballNetV2", "VballNetV3b", "VballNetV3c", "VballNetV3", "VballNetV1a", "VballNetV1c", "VballNetFastV1", "VballNetFastV2"]
+AVAILABLE_MODELS = ["TrackNet", "VballNetV2", "VballNetV3b", "VballNetV3c", "VballNetV3", "VballNetV1a", "VballNetV1c", "VballNetV1b", "VballNetFastV1", "VballNetFastV2"]
 
 
 def parse_args():
@@ -330,6 +331,10 @@ class Trainer:
         elif self.args.model_name == "VballNetV1a":
             self.model = VballNetV1a(**model_params).to(self.device)
             setattr(self.model, '_model_type', "VballNetV1a")
+
+        elif self.args.model_name == "VballNetV1b":
+            self.model = VballNetV1b(**model_params).to(self.device)
+            setattr(self.model, '_model_type', "VballNetV1b")
 
         elif self.args.model_name == "VballNetV2":
             self.model = VballNetV2(**model_params).to(self.device)

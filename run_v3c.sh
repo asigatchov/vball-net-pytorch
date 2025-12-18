@@ -8,11 +8,12 @@ VAL_DATADIR=datasets/mix-vb/test_preprocessed
 
 #DATADIR=../TrackNetV4-PyTorch/datasets/mix_volleyball_preprocessed
 #VAL_DATADIR=../TrackNetV4-PyTorch/datasets/mix_volleyball_test_preprocessed
+
 # Run training
 uv run  src/train_gru.py \
   --data "$DATADIR" \
   --val_data "$VAL_DATADIR" \
-  --model_name VballNetV3c \
+  --model_name VballNetV1c \
   --seq 15 \
   --grayscale \
   --optimizer AdamW \

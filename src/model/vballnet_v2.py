@@ -185,7 +185,7 @@ class ASPP(nn.Module):
 
 # --- VballNetV2 with Deep Supervision ---
 class VballNetV2(nn.Module):
-    def __init__(self, height=288, width=512, in_dim=9, out_dim=9):
+    def __init__(self, height=288, width=512, in_dim=15, out_dim=15):
         super().__init__()
         self.height = height
         self.width = width
