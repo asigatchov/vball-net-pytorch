@@ -127,7 +127,7 @@ class FrameHeatmapDataset(Dataset):
     def _get_sorted_images(self, directory):
         """Get sorted image files by numeric stem"""
         return sorted(
-            glob.glob(str(directory / "*.jpg")), key=lambda x: int(Path(x).stem)
+            glob.glob(str(directory / "*.png")), key=lambda x: int(Path(x).stem)
         )
 
     def _load_images_synced(self, input_paths, heatmap_paths):

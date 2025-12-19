@@ -33,6 +33,10 @@ IGNORED_DIRS = {'.git', '__pycache__', '.vscode', '.idea', 'node_modules'}
 # Target dimensions for processed images
 TARGET_WIDTH = 512
 TARGET_HEIGHT = 288
+
+# Форматы сохранения
+FORMAT_PNG_GRAYSCALE = 'PNG_GRAYSCALE'
+DEFAULT_IMAGE_FORMAT = FORMAT_PNG_GRAYSCALE
 JPEG_QUALITY = 95
 
 
@@ -198,6 +202,7 @@ def process_video_sequence(video_path, annotation_path, inputs_output_dir, heatm
     frames_processed = 0
     current_frame = 0
     encoding_params = [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
+    image_format = DEFAULT_IMAGE_FORMAT
 
     # Create frame annotation lookup for efficiency
     annotation_lookup = {}
@@ -244,11 +249,14 @@ def process_video_sequence(video_path, annotation_path, inputs_output_dir, heatm
                     # Invisible shuttlecock: zero heatmap
                     heatmap = np.zeros((TARGET_HEIGHT, TARGET_WIDTH), dtype=np.uint8)
 
-                # Save processed frame and heatmap
-                frame_output_path = os.path.join(sequence_inputs_dir, f"{current_frame}.jpg")
-                heatmap_output_path = os.path.join(sequence_heatmaps_dir, f"{current_frame}.jpg")
 
-                cv2.imwrite(frame_output_path, processed_frame, encoding_params)
+                # Сохраняем кадры и тепловые карты в PNG (градации серого)
+                frame_output_path = os.path.join(sequence_inputs_dir, f"{current_frame}.png")
+                heatmap_output_path = os.path.join(sequence_heatmaps_dir, f"{current_frame}.png")
+
+                # Кадр переводим в оттенки серого
+                processed_frame_gray = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2GRAY)
+                cv2.imwrite(frame_output_path, processed_frame_gray)
                 cv2.imwrite(heatmap_output_path, heatmap)
 
                 frames_processed += 1
@@ -419,6 +427,7 @@ Annotation Format (rally1_ball.csv):
         """
     )
 
+
     parser.add_argument(
         "--source",
         required=True,
@@ -441,6 +450,14 @@ Annotation Format (rally1_ball.csv):
         "--force",
         action="store_true",
         help="Force overwrite existing output directory"
+    )
+
+    # (Опционально) аргумент для формата сохранения
+    parser.add_argument(
+        "--format",
+        choices=[FORMAT_PNG_GRAYSCALE],
+        default=DEFAULT_IMAGE_FORMAT,
+        help="Output image format (default: PNG_GRAYSCALE)"
     )
 
     args = parser.parse_args()
@@ -468,7 +485,9 @@ Annotation Format (rally1_ball.csv):
     print(f"📂 Output: {args.output}")
     print(f"🎯 Heatmap sigma: {args.sigma}")
 
+
     # Execute preprocessing
+    # (Параметр args.format пока не используется, но может быть расширен в будущем)
     success = preprocess_dataset(args.source, args.output, args.sigma, args.force)
     sys.exit(0 if success else 1)
 

@@ -9,6 +9,7 @@ from tqdm import tqdm
 import torch
 
 from model.vballnet_v1a import VballNetV1a
+from model.vballnet_v1b import VballNetV1b
 from model.vballnet_v1c import VballNetV1c
 from model.vballnet_v3b import VballNetV3b
 from model.vballnet_v3c import VballNetV3c
@@ -17,6 +18,7 @@ from model.vballnet_v2 import VballNetV2
 MODEL_CONFIGS = {
     'VballNetV1c': VballNetV1c,
     'VballNetV1a': VballNetV1a,
+    'VballNetV1b': VballNetV1b,
     'VballNetV2': VballNetV2,
     'VballNetV3c': VballNetV3c,
     'VballNetV3b': VballNetV3b
@@ -39,14 +41,8 @@ def parse_model_params_from_name(model_path):
     grayscale = False
     model_type = None
     model_type = basename.split('_')[0] 
-    # Determine model type from filename
-    #    if "VballNetV1c" in basename:
-    #        model_type = "VballNetV1c"
-    #    elif "VballNetV1a" in basename:
-    #        model_type = "VballNetV1a"
-    #    else:
-    #        # Default to VballNetV1c for backward compatibility
-    #        model_type = "VballNetV1c"
+    if  model_type == 'checkpoint':
+        model_type = basename.split('_')[1] 
     
     if "seq" in basename:
         import re

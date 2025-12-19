@@ -175,8 +175,35 @@ class VballNetV1b(nn.Module):
 
 
 if __name__ == "__main__":
+    import argparse
+    import os
+
+    parser = argparse.ArgumentParser(description='VballNetV1b ONNX Exporter')
+    parser.add_argument('--model_path', type=str, help='Path to the trained model checkpoint')
+    args = parser.parse_args()
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # For testing purposes, use CPU
+    device = "cpu"
+
     model = VballNetV1b(in_dim=15, out_dim=15, fusion_type="TypeA").to(device)
+
+    # If model path is provided, load the trained model
+    if args.model_path:
+        print(f"Loading model from checkpoint: {args.model_path}")
+        try:
+            checkpoint = torch.load(args.model_path, map_location=device)
+            # Handle different checkpoint formats
+            if 'state_dict' in checkpoint:
+                model.load_state_dict(checkpoint['state_dict'])
+            elif 'model_state_dict' in checkpoint:
+                model.load_state_dict(checkpoint['model_state_dict'])
+            else:
+                model.load_state_dict(checkpoint)
+            print("Model loaded successfully!")
+        except Exception as e:
+            print(f"Failed to load model: {e}")
+            exit(1)
 
     # Проверка компиляции и прохождения тензора
     dummy_input = torch.randn(2, 15, 288, 512).to(device)
@@ -190,3 +217,28 @@ if __name__ == "__main__":
 
     params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Всего обучаемых параметров: {params:,}")
+
+    # Export to ONNX if model_path is provided
+    if args.model_path:
+        try:
+            model.eval()
+            dummy_input = torch.randn(1, 15, 288, 512, device=device)
+            onnx_filename = os.path.splitext(args.model_path)[0] + ".onnx"
+            torch.onnx.export(
+                model,
+                (dummy_input,),
+                onnx_filename,
+                opset_version=18,
+                input_names=["clip"],
+                output_names=["heatmaps"],
+                dynamic_axes={"clip": {0: "B"}, "heatmaps": {0: "B"}},
+                export_params=True,
+                do_constant_folding=True,
+                verbose=False,
+                dynamo=False
+            )
+            print(f"ONNX model saved: {onnx_filename}")
+        except Exception as e:
+            print("ONNX export failed:", e)
+            import traceback
+            traceback.print_exc()
