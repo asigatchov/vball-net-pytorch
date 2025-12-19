@@ -24,8 +24,7 @@ uv run  src/train_gru.py \
   --epochs 200 \
   --batch 12  \
   --scheduler ReduceLROnPlateau \
-  --workers 12 \
-  --resume  models/VballNetV2_seq15_grayscale_best.pth \
-  --alpha 0.5
+  --workers 16 \
+  --resume  outputs/VballNetFastV1_seq15_grayscale_20251219_151249/checkpoints/VballNetFastV1_seq15_grayscale_best.pth
 
 echo "Training completed!"

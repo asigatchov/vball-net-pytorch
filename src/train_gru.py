@@ -308,12 +308,9 @@ class Trainer:
     def setup_model(self):
         print("Initializing model...")
         # Calculate input/output dimensions based on grayscale flag and sequence length
-        if self.args.grayscale:
-            in_dim = self.args.seq
-            out_dim = self.args.seq
-        else:
-            in_dim = self.args.seq * 3
-            out_dim = self.args.seq
+        self.args.grayscale = True
+        in_dim = self.args.seq
+        out_dim = self.args.seq
 
         # Universal model initialization with height, width, in_dim, out_dim
         model_params = {
@@ -357,12 +354,7 @@ class Trainer:
             setattr(self.model, '_model_type', "VballNetV1c")
             
         elif self.args.model_name == "VballNetFastV1":
-            self.model = VballNetFastV1(
-                input_height=self.args.height,
-                input_width=self.args.width,
-                in_dim=in_dim,
-                out_dim=out_dim
-            ).to(self.device)
+            self.model = VballNetFastV1(**model_params).to(self.device)
             setattr(self.model, '_model_type', "VballNetFastV1")
             
         elif self.args.model_name == "VballNetFastV2":
