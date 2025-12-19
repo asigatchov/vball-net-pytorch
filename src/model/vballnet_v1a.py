@@ -100,7 +100,7 @@ class VballNetV1a(nn.Module):
     VballNetV1: Motion-enhanced U-Net for volleyball tracking.
     Supports Grayscale (N input frames, N output heatmaps) and RGB (N×3 input channels, N output heatmaps) modes.
     """
-    def __init__(self, height=288, width=512, in_dim=9, out_dim=9):
+    def __init__(self, height=288, width=512, in_dim=15, out_dim=15):
         super().__init__()
         mode = "grayscale" if in_dim == out_dim else "rgb"
         num_frames = in_dim if mode == "grayscale" else in_dim // 3
