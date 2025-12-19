@@ -10,10 +10,16 @@ import torch
 
 from model.vballnet_v1a import VballNetV1a
 from model.vballnet_v1c import VballNetV1c
+from model.vballnet_v3b import VballNetV3b
+from model.vballnet_v3c import VballNetV3c
+from model.vballnet_v2 import VballNetV2
 
 MODEL_CONFIGS = {
     'VballNetV1c': VballNetV1c,
-    'VballNetV1a': VballNetV1a
+    'VballNetV1a': VballNetV1a,
+    'VballNetV2': VballNetV2,
+    'VballNetV3c': VballNetV3c,
+    'VballNetV3b': VballNetV3b
 }
 
 
@@ -29,18 +35,18 @@ def parse_args():
 
 def parse_model_params_from_name(model_path):
     basename = os.path.basename(model_path)
-    seq = 3
+    seq = 15
     grayscale = False
     model_type = None
-    
+    model_type = basename.split('_')[0] 
     # Determine model type from filename
-    if "VballNetV1c" in basename:
-        model_type = "VballNetV1c"
-    elif "VballNetV1a" in basename:
-        model_type = "VballNetV1a"
-    else:
-        # Default to VballNetV1c for backward compatibility
-        model_type = "VballNetV1c"
+    #    if "VballNetV1c" in basename:
+    #        model_type = "VballNetV1c"
+    #    elif "VballNetV1a" in basename:
+    #        model_type = "VballNetV1a"
+    #    else:
+    #        # Default to VballNetV1c for backward compatibility
+    #        model_type = "VballNetV1c"
     
     if "seq" in basename:
         import re

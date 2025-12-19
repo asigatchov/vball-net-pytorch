@@ -81,6 +81,7 @@ class VballNetV1b(nn.Module):
             nn.ReLU(inplace=True),
             nn.BatchNorm2d(64)
         )
+        self.pool1 = nn.MaxPool2d(2, stride=2)  # Added missing pooling layer
         self.enc2 = nn.Sequential(
             nn.Conv2d(64, 128, 3, padding=1),
             nn.ReLU(inplace=True),
@@ -89,6 +90,7 @@ class VballNetV1b(nn.Module):
             nn.ReLU(inplace=True),
             nn.BatchNorm2d(128)
         )
+        self.pool2 = nn.MaxPool2d(2, stride=2)  # Added missing pooling layer
         self.enc3 = nn.Sequential(
             nn.Conv2d(128, 256, 3, padding=1),
             nn.ReLU(inplace=True),
@@ -100,6 +102,7 @@ class VballNetV1b(nn.Module):
             nn.ReLU(inplace=True),
             nn.BatchNorm2d(256)
         )
+        self.pool3 = nn.MaxPool2d(2, stride=2)  # Added missing pooling layer
         self.bottleneck = nn.Sequential(
             nn.Conv2d(256, 512, 3, padding=1),
             nn.ReLU(inplace=True),
@@ -154,9 +157,9 @@ class VballNetV1b(nn.Module):
 
         # Encoder
         e1 = self.enc1(x)
-        e2 = self.enc2(self.pool(e1))
-        e3 = self.enc3(self.pool(e2))
-        bott = self.bottleneck(self.pool(e3))
+        e2 = self.enc2(self.pool1(e1))
+        e3 = self.enc3(self.pool2(e2))
+        bott = self.bottleneck(self.pool3(e3))
 
         # Decoder with skip connections
         d = self.dec1(torch.cat([self.up(bott), e3], dim=1))
