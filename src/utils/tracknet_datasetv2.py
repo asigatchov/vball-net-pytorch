@@ -123,13 +123,13 @@ class FrameHeatmapDataset(Dataset):
             }
             for i in range(len(input_files) - self.seq + 1)
         ]
-
     def _get_sorted_images(self, directory):
         """Get sorted image files by numeric stem"""
-        return sorted(
-            glob.glob(str(directory / "*.png")), key=lambda x: int(Path(x).stem)
-        )
-
+        files = []
+        files.extend(glob.glob(str(directory / "*.png")))
+        files.extend(glob.glob(str(directory / "*.jpg")))
+        return sorted(files, key=lambda x: int(Path(x).stem))
+    
     def _load_images_synced(self, input_paths, heatmap_paths):
         """
         Load and augment images and heatmaps synchronously using cv2 for faster loading.
