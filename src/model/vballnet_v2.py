@@ -1,338 +1,272 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
+import argparse
+import os
 
 
 # --- Утилиты ---
-def get_center_of_mass(heatmap):
+def rearrange_tensor(input_tensor, order="BTCHW"):
     """
-    Вычисляет центр массы по тепловой карте.
-    heatmap: (H, W) or (B, H, W)
-    Возвращает: (x, y) координаты в пикселях
+    Перестановка размерностей тензора: из любого порядка B,C,H,W,T → BTCHW.
     """
-    if heatmap.dim() == 3:
-        B, H, W = heatmap.shape
-        xx, yy = torch.meshgrid(torch.arange(W), torch.arange(H), indexing='xy')
-        xx = xx.float().to(heatmap.device)
-        yy = yy.float().to(heatmap.device)
-        coords = []
-        for b in range(B):
-            mass = heatmap[b]
-            total_mass = mass.sum()
-            if total_mass > 1e-6:
-                cx = (xx * mass).sum() / total_mass
-                cy = (yy * mass).sum() / total_mass
-            else:
-                cx = cy = -1  # мяч не найден
-            coords.append([cx, cy])
-        return torch.tensor(coords, device=heatmap.device)  # (B, 2)
-    else:
-        H, W = heatmap.shape
-        xx, yy = torch.meshgrid(torch.arange(W), torch.arange(H), indexing='xy')
-        xx, yy = xx.float().to(heatmap.device), yy.float().to(heatmap.device)
-        mass = heatmap
-        total_mass = mass.sum()
-        if total_mass > 1e-6:
-            cx = (xx * mass).sum() / total_mass
-            cy = (yy * mass).sum() / total_mass
-            return torch.tensor([cx, cy], device=heatmap.device)
-        return torch.tensor([-1., -1.], device=heatmap.device)
+    order = order.upper()
+    perm = [order.index(dim) for dim in "BTCHW"]
+    return input_tensor.permute(*perm)
 
 
-# --- Функция для создания гауссова ядра ---
-def gaussian_kernel(kernel_size=5, sigma=1.0, device='cpu'):
+def power_normalization(input_tensor, a, b):
     """
-    Создает 2D гауссово ядро для свертки.
-    kernel_size: размер ядра (нечетное число)
-    sigma: стандартное отклонение гауссианы
-    device: устройство для тензора
-    Возвращает: тензор (1, 1, kernel_size, kernel_size)
+    Power normalization для motion attention (как в оригинальной TF-версии).
     """
-    x = torch.arange(-kernel_size // 2 + 1., kernel_size // 2 + 1., device=device)
-    x = x.repeat(kernel_size, 1)
-    y = x.t()
-    gaussian = torch.exp(-(x**2 + y**2) / (2 * sigma**2))
-    gaussian = gaussian / gaussian.sum()
-    return gaussian.view(1, 1, kernel_size, kernel_size)
+    return 1 / (1 + torch.exp(-(5 / (0.45 * torch.abs(torch.tanh(a)) + 1e-1)) *
+                              (torch.abs(input_tensor) - 0.6 * torch.tanh(b))))
 
-# --- Enhanced MotionPrompt (векторизованная, ONNX-совместимая) ---
-class EnhancedMotionPrompt2(nn.Module):
-    def __init__(self, num_frames, kernel_size=5, sigma=1.0):
+
+# --- Depthwise Separable Convolution Block ---
+class DepthwiseSeparableConv(nn.Module):
+    """
+    Depthwise (groups=in_channels) + Pointwise (1x1) свёртка.
+    Замена обычного Conv2d(3x3) для значительного снижения параметров.
+    """
+    def __init__(self, in_ch, out_ch, stride=1):
         super().__init__()
-        self.num_frames = num_frames
-        self.kernel_size = kernel_size
-        self.sigma = sigma
-        
-        # Создаём гауссово ядро и сохраняем как буфер
-        self.register_buffer('gaussian_kernel', gaussian_kernel(kernel_size, sigma))
-        
-        # Параметры для адаптивной активации
-        self.a = nn.Parameter(torch.tensor(1.0))  # масштаб
-        self.b = nn.Parameter(torch.tensor(0.0))  # смещение
-
-    def forward(self, video_seq):
-        # video_seq: (B, T, H, W)
-        B, T, H, W = video_seq.shape
-
-        # Применяем гауссово размытие ко всем кадрам
-        blurred = F.conv2d(
-            video_seq.view(B * T, 1, H, W),
-            self.gaussian_kernel,
-            padding=self.kernel_size // 2
-        ).view(B, T, H, W)
-
-        # --- Векторизованное вычисление разностей ---
-        # Центральные разности: (blurred[:, t+1] - blurred[:, t-1]) / 2
-        if T == 1:
-            # Крайний случай: один кадр
-            diff = torch.zeros_like(blurred)
-        else:
-            # Сдвиг вперёд: t+1 (для t=0..T-2), последний кадр дублируется
-            next_frames = torch.cat([blurred[:, 1:], blurred[:, -1:]], dim=1)  # (B, T, H, W)
-            # Сдвиг назад: t-1 (для t=1..T-1), первый кадр дублируется
-            prev_frames = torch.cat([blurred[:, :1], blurred[:, :-1]], dim=1)  # (B, T, H, W)
-            # Центральная разность
-            diff = 0.5 * (next_frames - prev_frames)
-
-        # Модуль разности
-        mag = torch.abs(diff)
-
-        # Адаптивная сигмоида: усиливает значимые изменения
-        motion_maps = torch.sigmoid(self.a * (mag - self.b))
-
-        return motion_maps, None  # (B, T, H, W)
-
-
-# --- Enhanced MotionPrompt (ONNX-совместимая версия) ---
-class EnhancedMotionPrompt(nn.Module):
-    def __init__(self, num_frames, kernel_size=5, sigma=1.0):
-        super().__init__()
-        self.num_frames = num_frames
-        self.kernel_size = kernel_size
-        self.sigma = sigma
-        # Регистрируем гауссово ядро как буфер
-        self.register_buffer('gaussian_kernel', gaussian_kernel(kernel_size, sigma))
-        # Обучаемые параметры a и b для сигмоиды
-        self.a = nn.Parameter(torch.tensor(1.0))  # масштабирующий коэффициент
-        self.b = nn.Parameter(torch.tensor(0.0))  # смещение
-
-    def forward(self, video_seq):
-        # video_seq: (B, T, H, W)
-        B, T, H, W = video_seq.shape
-        # Применяем гауссову свертку
-        blurred = F.conv2d(
-            video_seq.view(B * T, 1, H, W),
-            self.gaussian_kernel,
-            padding=self.kernel_size // 2
-        ).view(B, T, H, W)
-
-        # Вычисляем разницу между кадрами
-        motion_maps = []
-        for t in range(T):
-            # Для первого и последнего кадра используем соседние кадры
-            prev_idx = torch.clamp(torch.tensor(t - 1, device=video_seq.device), 0, T - 1)
-            next_idx = torch.clamp(torch.tensor(t + 1, device=video_seq.device), 0, T - 1)
-            diff = 0.5 * (blurred[:, next_idx] - blurred[:, prev_idx])
-            mag = torch.abs(diff)
-            motion_map = torch.sigmoid(self.a * (mag - self.b))
-            motion_maps.append(motion_map)
-        return torch.stack(motion_maps, dim=1), None  # (B, T, H, W)
-
-
-# --- Fusion Layer Type B ---
-class FusionLayerTypeB(nn.Module):
-    def __init__(self, num_frames, out_dim):
-        super().__init__()
-        self.conv = nn.Conv2d(out_dim * 2, out_dim, kernel_size=1)
-        self.norm = nn.BatchNorm2d(out_dim)
-
-    def forward(self, feature_map, attention_map):
-        # feature_map: (B, T, H, W), attention_map: (B, T, H, W)
-        x = torch.cat([feature_map, attention_map], dim=1)  # (B, 2T, H, W)
-        x = self.conv(x)
-        x = self.norm(x)
-        return F.relu(x)
-
-
-# --- ASPP (Atrous Spatial Pyramid Pooling) ---
-class ASPP(nn.Module):
-    def __init__(self, in_channels, out_channels=256):
-        super().__init__()
-        self.conv1x1 = nn.Conv2d(in_channels, out_channels, kernel_size=1)
-        self.conv3x3_6 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=6, dilation=6)
-        self.conv3x3_12 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=12, dilation=12)
-        self.conv3x3_18 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=18, dilation=18)
-        self.global_pool = nn.AdaptiveAvgPool2d(1)
-        self.conv1x1_pool = nn.Conv2d(in_channels, out_channels, kernel_size=1)
-        self.final = nn.Conv2d(5 * out_channels, out_channels, kernel_size=1)
-        self.norm = nn.BatchNorm2d(out_channels)
+        self.depthwise = nn.Conv2d(in_ch, in_ch, kernel_size=3, padding=1, groups=in_ch, stride=stride, bias=False)
+        self.pointwise = nn.Conv2d(in_ch, out_ch, kernel_size=1, bias=False)
+        self.bn = nn.BatchNorm2d(out_ch)
+        self.relu = nn.ReLU(inplace=True)
 
     def forward(self, x):
-        h, w = x.shape[2:]
-        features1 = self.conv1x1(x)
-        features2 = self.conv3x3_6(x)
-        features3 = self.conv3x3_12(x)
-        features4 = self.conv3x3_18(x)
-        pooled = self.global_pool(x)
-        pooled = F.interpolate(pooled, size=(h, w), mode='bilinear', align_corners=False)
-        pooled = self.conv1x1_pool(pooled)
-        out = torch.cat([features1, features2, features3, features4, pooled], dim=1)
-        out = self.final(out)
-        out = self.norm(out)
-        return F.relu(out)
+        x = self.depthwise(x)
+        x = self.pointwise(x)
+        x = self.bn(x)
+        x = self.relu(x)
+        return x
 
 
-# --- VballNetV2 with Deep Supervision ---
+# --- Spatial Attention Module (как в TF-версии) ---
+class SpatialAttention(nn.Module):
+    """
+    CBAM-like spatial attention:
+    avg_pool + max_pool → concat → 7x7 conv → sigmoid
+    """
+    def __init__(self, kernel_size=7):
+        super().__init__()
+        self.conv = nn.Conv2d(2, 1, kernel_size=kernel_size, padding=kernel_size//2, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        # x: (B, C, H, W)
+        avg_pool = torch.mean(x, dim=1, keepdim=True)   # (B, 1, H, W)
+        max_pool, _ = torch.max(x, dim=1, keepdim=True)  # (B, 1, H, W)
+        concat = torch.cat([avg_pool, max_pool], dim=1)  # (B, 2, H, W)
+        attention = self.conv(concat)                   # (B, 1, H, W)
+        return x * self.sigmoid(attention)
+
+
+# --- Motion Prompt Module ---
+class MotionPrompt(nn.Module):
+    def __init__(self, num_frames, mode="grayscale", penalty_weight=0.0):
+        super().__init__()
+        self.num_frames = num_frames
+        self.mode = mode.lower()
+        assert self.mode in ["rgb", "grayscale"]
+        self.gray_scale = torch.tensor([0.299, 0.587, 0.114], dtype=torch.float32)
+        self.a = nn.Parameter(torch.tensor(0.1))
+        self.b = nn.Parameter(torch.tensor(0.0))
+        self.lambda1 = penalty_weight
+
+    def forward(self, video_seq):
+        loss = torch.tensor(0.0, device=video_seq.device)
+        # video_seq is already in BTCHW format: (B, T, H, W)
+        norm_seq = video_seq * 0.225 + 0.45
+
+        if self.mode == "rgb":
+            # For RGB mode, we assume input is (B, T*3, H, W) and reshape to (B, T, 3, H, W)
+            B, TC, H, W = norm_seq.shape
+            T = self.num_frames
+            norm_seq = norm_seq.view(B, T, 3, H, W)
+            weights = self.gray_scale.to(norm_seq.device)
+            grayscale_seq = torch.einsum("btcwh,c->btwh", norm_seq, weights)
+        else:
+            # For grayscale mode, input is (B, T, H, W)
+            grayscale_seq = norm_seq  # already in correct format (B, T, H, W)
+
+        attention_maps = []
+        for t in range(self.num_frames):
+            if t == 0:
+                diff = grayscale_seq[:, t + 1] - grayscale_seq[:, t]
+            elif t == self.num_frames - 1:
+                diff = grayscale_seq[:, t] - grayscale_seq[:, t - 1]
+            else:
+                diff = (grayscale_seq[:, t + 1] - grayscale_seq[:, t - 1]) / 2.0
+            attention_maps.append(power_normalization(diff, self.a, self.b))
+
+        attention_map = torch.stack(attention_maps, dim=1)  # (B, T, H, W)
+
+        if self.training and self.lambda1 > 0:
+            norm_att = attention_map.unsqueeze(2)  # для temporal loss
+            temp_diff = norm_att[:, 1:] - norm_att[:, :-1]
+            B, T, _, H, W = grayscale_seq.shape
+            temporal_loss = torch.sum(temp_diff ** 2) / (H * W * (T - 1) * B)
+            loss = self.lambda1 * temporal_loss
+
+        return attention_map, loss
+
+
+# --- Fusion Layer Type A (по-кадровое умножение) ---
+class FusionLayerTypeA(nn.Module):
+    def __init__(self, num_frames, out_dim):
+        super().__init__()
+        self.num_frames = num_frames
+        self.out_dim = out_dim
+
+    def forward(self, feature_map, attention_map):
+        # feature_map: (B, out_dim, H, W), attention_map: (B, T, H, W)
+        # Берём attention для каждого кадра
+        return feature_map * attention_map[:, :self.out_dim]
+
+
+# --- Улучшенная VballNetV1a ---
 class VballNetV2(nn.Module):
     def __init__(self, height=288, width=512, in_dim=15, out_dim=15):
         super().__init__()
         self.height = height
         self.width = width
-        self.in_dim = in_dim
-        self.out_dim = out_dim
+        mode = "grayscale" if in_dim == out_dim else "rgb"
+        num_frames = in_dim if mode == "grayscale" else in_dim // 3
 
-        # Motion Prompt
-        self.motion_prompt = EnhancedMotionPrompt(num_frames=in_dim)
+        self.motion_prompt = MotionPrompt(num_frames=num_frames, mode=mode)
+        self.fusion_layer = FusionLayerTypeA(num_frames=num_frames, out_dim=out_dim)
 
-        # Fusion Layer
-        self.fusion_layer = FusionLayerTypeB(num_frames=in_dim, out_dim=out_dim)
-
-        # Encoder
-        self.enc1 = self._conv_block(in_dim, 32)
+        # Encoder с DepthwiseSeparableConv
+        self.enc1 = DepthwiseSeparableConv(in_dim, 32)
+        self.enc1_1 = DepthwiseSeparableConv(32, 32)
         self.pool1 = nn.MaxPool2d(2, stride=2)
 
-        self.enc2 = self._conv_block(32, 64)
+        self.enc2 = DepthwiseSeparableConv(32, 64)
         self.pool2 = nn.MaxPool2d(2, stride=2)
 
-        self.enc3 = self._conv_block(64, 128)
+        self.enc3 = DepthwiseSeparableConv(64, 128)
 
-        # ASPP
-        self.aspp = ASPP(128, 128)
+        # Spatial Attention в bottleneck (как в TF-версии)
+        self.spatial_attention = SpatialAttention(kernel_size=7)
 
-        # Decoder с deep supervision
+        # Decoder
         self.up1 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
-        self.dec1 = self._conv_block(128 + 64, 64)
-        self.supervision1 = nn.Conv2d(64, out_dim, kernel_size=1)  # выход 1
+        self.dec1 = DepthwiseSeparableConv(128 + 64, 64)
 
         self.up2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
-        self.dec2 = self._conv_block(64 + 32, 32)
-        self.supervision2 = nn.Conv2d(32, out_dim, kernel_size=1)  # выход 2
+        self.dec2 = DepthwiseSeparableConv(64 + 32, 32)
 
-        # Final output
-        self.final_conv = nn.Conv2d(32, out_dim, kernel_size=1)
-
-    def _conv_block(self, in_ch, out_ch):
-        return nn.Sequential(
-            nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.BatchNorm2d(out_ch),
-            nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.BatchNorm2d(out_ch)
-        )
+        self.out_conv = nn.Conv2d(32, out_dim, kernel_size=1)
 
     def forward(self, x):
-        # x: (B, 9, H, W)
-        B, T, H, W = x.shape
-        assert H == self.height and W == self.width, f"Input size must be ({self.height}, {self.width}), got ({H}, {W})"
-        assert T == self.in_dim, f"Expected {self.in_dim} frames, got {T}"
+        B, TC, H, W = x.shape  # TC = total channels (T for grayscale, T*3 for RGB)
+        assert H == self.height and W == self.width, f"Expected ({self.height}, {self.width}), got ({H}, {W})"
+        
+        # Determine actual number of frames based on mode
+        if self.motion_prompt.mode == "grayscale":
+            T = TC  # For grayscale, T is the same as TC
+        else:  # RGB mode
+            T = TC // 3  # For RGB, TC = T * 3, so actual frames = TC / 3
+        
+        assert T == self.motion_prompt.num_frames
 
         # Motion attention
         motion_maps, _ = self.motion_prompt(x)  # (B, T, H, W)
 
         # Encoder
-        x1 = self.enc1(x)  # (B, 32, H, W)
-        x = self.pool1(x1)
+        x1 = self.enc1(x)
+        x1_skip = self.enc1_1(x1)       # skip connection
+        x = self.pool1(x1_skip)
 
-        x2 = self.enc2(x)  # (B, 64, H//2, W//2)
+        x2 = self.enc2(x)               # skip connection
         x = self.pool2(x2)
 
-        x = self.enc3(x)  # (B, 128, H//4, W//4)
-        x = self.aspp(x)
+        x = self.enc3(x)
+        x = self.spatial_attention(x)   # ← добавлено!
 
-        # Decoder с deep supervision
-        x = self.up1(x)  # (B, 128, H//2, W//2)
+        # Decoder
+        x = self.up1(x)
         x = torch.cat([x, x2], dim=1)
         x = self.dec1(x)
-        out1 = self.supervision1(x)  # (B, 9, H//2, W//2)
-        out1_up = F.interpolate(out1, size=(H, W), mode='bilinear', align_corners=False)
 
-        x = self.up2(x)  # (B, 64, H, W)
-        x = torch.cat([x, x1], dim=1)
+        x = self.up2(x)
+        x = torch.cat([x, x1_skip], dim=1)
         x = self.dec2(x)
-        out2 = self.supervision2(x)  # (B, 9, H, W)
 
-        # Final output
-        final = self.final_conv(x)  # (B, 9, H, W)
+        x = self.out_conv(x)
+        x = self.fusion_layer(x, motion_maps)
+        x = torch.sigmoid(x)
 
-        # Финальная фьюзия движения
-        final = self.fusion_layer(final, motion_maps)
-        out2 = self.fusion_layer(out2, motion_maps)
-
-        # Deep supervision: суммируем все выходы
-        fused_output = final + out2 + out1_up
-        output = torch.sigmoid(fused_output)
-
-        return output  # (B, 9, H, W)
-
-    def predict_centers(self, x, threshold=0.3):
-        """
-        Предсказать центры мяча для всех 9 кадров.
-        Возвращает: (B, 9, 2) — (x, y) координаты или (-1, -1) если нет мяча.
-        """
-        with torch.no_grad():
-            heatmaps = self.forward(x)  # (B, 9, H, W)
-            centers = []
-            for b in range(heatmaps.shape[0]):
-                batch_centers = []
-                for t in range(9):
-                    hmap = heatmaps[b, t]
-                    if hmap.max() > threshold:
-                        center = get_center_of_mass(hmap)
-                    else:
-                        center = torch.tensor([-1.0, -1.0], device=hmap.device)
-                    batch_centers.append(center)
-                centers.append(torch.stack(batch_centers))
-            return torch.stack(centers)  # (B, 9, 2)
+        return x
 
 
+# --- Main блок ---
 if __name__ == "__main__":
-    # Инициализация модели
     height, width = 288, 512
-    in_dim, out_dim = 9, 9
+    in_dim, out_dim = 15, 15  # дефолт: 15 grayscale кадров → 15 heatmaps
+
     model = VballNetV2(height=height, width=width, in_dim=in_dim, out_dim=out_dim)
 
-    # Перевод модели в режим оценки и на CPU (для ONNX)
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Модель VballNetV2 инициализирована")
+    print(f"Параметры: {total_params:,} (ожидается ~120–150k благодаря DepthwiseSeparable)")
+
+    # Тестовый прогон
+    device = torch.device("cpu")  # для стабильности экспорта
+    model.to(device)
     model.eval()
-    model.to('cpu')
 
-    # Создание примера входных данных
-    dummy_input = torch.randn(1, in_dim, height, width)
-
-    # Проверка модели на примере
+    dummy_input = torch.randn(1, in_dim, height, width, device=device)
     with torch.no_grad():
         output = model(dummy_input)
-        print(f"Output shape: {output.shape}")  # Ожидается: torch.Size([1, 9, 288, 512])
+        print(f"Input shape:  {dummy_input.shape}")
+        print(f"Output shape: {output.shape}")
+        print(f"Output range: [{output.min().item():.3f}, {output.max().item():.3f}]")
 
-    # Экспорт модели в ONNX
-    onnx_path = "vballnet_v2.onnx"
-    try:
-        torch.onnx.export(
-            model,
-            dummy_input,
-            onnx_path,
-            export_params=True,
-            opset_version=11,
-            do_constant_folding=True,
-            input_names=["input"],
-            output_names=["output"],
-            dynamic_axes={
-                "input": {0: "batch_size"},
-                "output": {0: "batch_size"}
-            },
-            verbose=False
-        )
-        print(f"Model successfully exported to {onnx_path}")
-    except Exception as e:
-        print(f"Failed to export model to ONNX: {e}")
+    # Аргументы для экспорта
+    parser = argparse.ArgumentParser(description='VballNetV2 → ONNX экспорт')
+    parser.add_argument('--model_path', type=str, default=None,
+                        help='Путь к обученному чекпоинту (.pth). Если указан — загрузить и экспортировать в ONNX')
+    args = parser.parse_args()
+
+    if args.model_path:
+        print(f"Загрузка весов из: {args.model_path}")
+        try:
+            checkpoint = torch.load(args.model_path, map_location=device)
+            if 'state_dict' in checkpoint:
+                model.load_state_dict(checkpoint['state_dict'])
+            elif 'model_state_dict' in checkpoint:
+                model.load_state_dict(checkpoint['model_state_dict'])
+            else:
+                model.load_state_dict(checkpoint)
+            print("Веса успешно загружены")
+        except Exception as e:
+            print(f"Ошибка загрузки: {e}")
+            exit(1)
+
+        onnx_path = os.path.splitext(args.model_path)[0] + ".onnx"
+        print(f"Экспорт в ONNX: {onnx_path}")
+
+        try:
+            torch.onnx.export(
+                model,
+                (dummy_input,),
+                onnx_path,
+                export_params=True,
+                opset_version=13,
+                do_constant_folding=True,
+                input_names=["clip"],
+                output_names=["heatmaps"],
+                dynamic_axes={"clip": {0: "B"}, "heatmaps": {0: "B"}},
+                verbose=False
+            )
+            print("ONNX модель успешно сохранена!")
+        except Exception as e:
+            print(f"Ошибка экспорта ONNX: {e}")
+            import traceback
+            traceback.print_exc()
+    else:
+        print("Запуск без --model_path → только тест инициализации. Для экспорта укажите путь к чекпоинту.")

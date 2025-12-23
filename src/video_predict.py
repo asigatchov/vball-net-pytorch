@@ -33,6 +33,7 @@ def parse_args():
     parser.add_argument("--model_path", type=str, required=True, help="Path to model weights file (e.g., outputs/exp_20250801_110350/checkpoints/best_model.pth)")
     parser.add_argument("--visualize", action="store_true", default=False, help="Enable visualization on display using cv2")
     parser.add_argument("--only_csv", action="store_true", default=False, help="Save only CSV, skip video output")
+    parser.add_argument("--debug", action="store_true", default=False, help="Overlay heatmap on frames for debugging")
     return parser.parse_args()
 
 def parse_model_params_from_name(model_path):
@@ -97,7 +98,8 @@ def setup_output_writer(video_basename, output_dir, frame_width, frame_height, f
     output_path = os.path.join(output_dir, f'{video_basename}_predict.mp4')
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
-    out_writer = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (frame_width, frame_height))
+    fourcc = 1983148141  # cv2.VideoWriter_fourcc(*'mp4v')
+    out_writer = cv2.VideoWriter(output_path, fourcc, fps, (frame_width, frame_height))
     return out_writer, output_path
 
 def setup_csv_file(video_basename, output_dir):
@@ -106,7 +108,9 @@ def setup_csv_file(video_basename, output_dir):
     csv_path = os.path.join(output_dir, f'{video_basename}_predict_ball.csv')
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
-    pd.DataFrame(columns=['Frame', 'Visibility', 'X', 'Y']).to_csv(csv_path, index=False)
+    columns = ['Frame', 'Visibility', 'X', 'Y']
+    df = pd.DataFrame({col: [] for col in columns})
+    df.to_csv(csv_path, index=False)
     return csv_path
 
 def append_to_csv(result, csv_path):
@@ -159,7 +163,8 @@ def visualize_heatmaps(output, seq=9):
     center_idx = seq // 2
     center_idx = seq - 1 
     heatmap = output[center_idx, :, :]
-    heatmap_norm = cv2.normalize(heatmap, None, 0, 255, cv2.NORM_MINMAX)
+    dst = np.zeros_like(heatmap, dtype=np.uint8)
+    heatmap_norm = cv2.normalize(heatmap, dst, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
     heatmap_uint8 = heatmap_norm.astype(np.uint8)
     return  cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
     #cv2.imshow(f'Heatmap Center Frame {center_idx+1}', heatmap_color)
@@ -264,14 +269,26 @@ def main():
                 }
                 append_to_csv(result, csv_path)
 
-                if args.visualize or out_writer is not None:
+                if args.visualize or out_writer is not None or args.debug:
                     vis_frame = frame.copy()
-                    # Преобразование в grayscale
-                    vis_frame = cv2.cvtColor(vis_frame, cv2.COLOR_BGR2GRAY)
                     
-                    vis_frame = cv2.cvtColor(vis_frame, cv2.COLOR_GRAY2BGR)
+                    # When in debug mode, we keep the original BGR frame to overlay heatmap on
+                    # Otherwise, convert to grayscale for visualization
+                    if not args.debug:
+                        # Преобразование в grayscale
+                        vis_frame = cv2.cvtColor(vis_frame, cv2.COLOR_BGR2GRAY)
+                        vis_frame = cv2.cvtColor(vis_frame, cv2.COLOR_GRAY2BGR)
 
                     vis_frame = draw_track(vis_frame, track_points, current_ball_bbox=current_ball_bbox)
+                    
+                    # Overlay heatmap if debug flag is enabled
+                    if args.debug and output is not None:
+                        heatmap_overlay = visualize_heatmaps(output, seq)
+                        # Resize heatmap to match frame dimensions
+                        heatmap_overlay = cv2.resize(heatmap_overlay, (vis_frame.shape[1], vis_frame.shape[0]))
+                        # Blend the heatmap with the frame
+                        vis_frame = cv2.addWeighted(vis_frame, 0.7, heatmap_overlay, 0.3, 0)
+
                     if args.visualize:
                         cv2.namedWindow("Tracking", cv2.WINDOW_NORMAL)
                         cv2.imshow('Tracking', vis_frame)
@@ -281,8 +298,12 @@ def main():
 
                     if out_writer is not None:
                         # Для VideoWriter нужен 3-канальный формат
-                        vis_frame_to_write = cv2.cvtColor(vis_frame, cv2.COLOR_GRAY2BGR)
-                        out_writer.write(vis_frame_to_write)
+                        # Check if vis_frame is already 3-channel (due to heatmap overlay)
+                        if len(vis_frame.shape) == 3 and vis_frame.shape[2] == 3:
+                            out_writer.write(vis_frame)
+                        else:
+                            vis_frame_to_write = cv2.cvtColor(vis_frame, cv2.COLOR_GRAY2BGR)
+                            out_writer.write(vis_frame_to_write)
 
         end_time = time.time()
         batch_time = end_time - start_time
