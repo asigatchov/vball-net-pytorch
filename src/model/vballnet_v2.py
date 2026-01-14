@@ -57,8 +57,18 @@ class SpatialAttention(nn.Module):
 
     def forward(self, x):
         # x: (B, C, H, W)
-        avg_pool = torch.mean(x, dim=1, keepdim=True)   # (B, 1, H, W)
-        max_pool, _ = torch.max(x, dim=1, keepdim=True)  # (B, 1, H, W)
+        # For ONNX compatibility, implement mean and max manually
+        b, c, h, w = x.shape
+        
+        # Calculate mean across channel dimension (dim=1) using sum and division
+        avg_pool = torch.sum(x, dim=1, keepdim=True) / c  # (B, 1, H, W)
+        
+        # Calculate max across channel dimension (dim=1) using manual implementation
+        # Initialize max with the first channel
+        max_pool = x[:, 0:1, :, :]  # (B, 1, H, W)
+        for i in range(1, c):
+            max_pool = torch.maximum(max_pool, x[:, i:i+1, :, :])  # (B, 1, H, W)
+        
         concat = torch.cat([avg_pool, max_pool], dim=1)  # (B, 2, H, W)
         attention = self.conv(concat)                   # (B, 1, H, W)
         return x * self.sigmoid(attention)
@@ -235,7 +245,8 @@ if __name__ == "__main__":
     if args.model_path:
         print(f"Загрузка весов из: {args.model_path}")
         try:
-            checkpoint = torch.load(args.model_path, map_location=device)
+            # Load checkpoint with weights_only=False to handle various checkpoint formats
+            checkpoint = torch.load(args.model_path, map_location=device, weights_only=False)
             if 'state_dict' in checkpoint:
                 model.load_state_dict(checkpoint['state_dict'])
             elif 'model_state_dict' in checkpoint:
@@ -256,12 +267,14 @@ if __name__ == "__main__":
                 (dummy_input,),
                 onnx_path,
                 export_params=True,
-                opset_version=13,
+                opset_version=11,  # Lower opset version for better compatibility
                 do_constant_folding=True,
                 input_names=["clip"],
                 output_names=["heatmaps"],
                 dynamic_axes={"clip": {0: "B"}, "heatmaps": {0: "B"}},
-                verbose=False
+                verbose=False,
+                # Disable dynamo to avoid potential conversion issues
+                dynamo=False
             )
             print("ONNX модель успешно сохранена!")
         except Exception as e:

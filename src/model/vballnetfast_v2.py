@@ -59,13 +59,13 @@ class VballNetFastV2(nn.Module):
     Returns:
         Model: PyTorch-модель VballNetFastV2 с GRU.
     """
-    def __init__(self, input_height, input_width, in_dim=9, out_dim=9, 
-                 channels=[8, 16, 32], bottleneck_channels=64, 
-                 bottleneck_kernel_size=3, gru_hidden_size=64, dropout_p=0.2):
+    def __init__(self, height, width, in_dim=15, out_dim=15, 
+                 channels=[8, 16, 32], bottleneck_channels=128, 
+                 bottleneck_kernel_size=3, gru_hidden_size=128, dropout_p=0.2):
         super(VballNetFastV2, self).__init__()
         
-        self.input_height = input_height
-        self.input_width = input_width
+        self.input_height = height
+        self.input_width = width
         self.in_dim = in_dim
         self.out_dim = out_dim
         self.channels = channels
@@ -174,3 +174,84 @@ class VballNetFastV2(nn.Module):
     def get_num_parameters(self):
         """Возвращает общее количество обучаемых параметров."""
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+
+if __name__ == "__main__":
+    # Model initialization and testing
+    height, width, in_dim, out_dim = 288, 512, 15, 15
+    model = VballNetFastV2(height, width, in_dim, out_dim)
+    total_params = model.get_num_parameters()
+    print(f"VballNetFastV2 initialized with {total_params:,} parameters")
+
+    # Forward pass test
+    test_input = torch.randn(2, in_dim, height, width)
+    test_output = model(test_input)
+    print(f"Input shape: {test_input.shape}")
+    print(f"Output shape: {test_output.shape}")
+    print(f"Output range: [{test_output.min():.3f}, {test_output.max():.3f}]")
+    print("✓ VballNetFastV2 ready for training!")
+
+    # Add ONNX export functionality
+    import argparse
+    import os
+
+    parser = argparse.ArgumentParser(description='VballNetFastV2 ONNX Exporter')
+    parser.add_argument('--model_path', type=str, help='Path to the trained model checkpoint')
+    parser.add_argument('--export_onnx', action='store_true', help='Export as ONNX model')
+    args = parser.parse_args()
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # For testing purposes, use CPU
+    device = 'cpu'
+
+    # If model path is provided, load the trained model
+    if args.model_path:
+        print(f"Loading model from checkpoint: {args.model_path}")
+        try:
+            checkpoint = torch.load(args.model_path, map_location=device)
+
+            # Handle different checkpoint formats
+            if 'state_dict' in checkpoint:
+                model.load_state_dict(checkpoint['state_dict'])
+            elif 'model_state_dict' in checkpoint:
+                model.load_state_dict(checkpoint['model_state_dict'])
+            else:
+                model.load_state_dict(checkpoint)
+
+            print("Model loaded successfully!")
+        except Exception as e:
+            print(f"Failed to load model: {e}")
+            exit(1)
+
+    if args.export_onnx:
+        try:
+            model.eval()
+            dummy_input = torch.randn(1, 15, 288, 512, device=device)
+
+            if args.model_path:
+                # Save ONNX next to the model file, replacing extension with .onnx
+                onnx_filename = os.path.splitext(args.model_path)[0] + ".onnx"
+            else:
+                onnx_filename = "vball_net_fast_v2_trained.onnx"
+
+            torch.onnx.export(
+                model,
+                (dummy_input,),
+                onnx_filename,
+                opset_version=13,
+                input_names=["clip"],
+                output_names=["heatmaps"],
+                dynamic_axes={
+                    "clip": {0: "B"},
+                    "heatmaps": {0: "B"}
+                },
+                export_params=True,
+                do_constant_folding=True,
+                verbose=False,
+                dynamo=False
+            )
+            print(f"ONNX model saved: {onnx_filename}")
+        except Exception as e:
+            print("ONNX export failed:", e)
+            import traceback
+            traceback.print_exc()

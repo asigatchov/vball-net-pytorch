@@ -14,6 +14,7 @@ from model.vballnet_v1c import VballNetV1c
 from model.vballnet_v3b import VballNetV3b
 from model.vballnet_v3c import VballNetV3c
 from model.vballnet_v2 import VballNetV2
+from model.vballnetfast_v2 import VballNetFastV2
 
 MODEL_CONFIGS = {
     'VballNetV1c': VballNetV1c,
@@ -21,7 +22,8 @@ MODEL_CONFIGS = {
     'VballNetV1b': VballNetV1b,
     'VballNetV2': VballNetV2,
     'VballNetV3c': VballNetV3c,
-    'VballNetV3b': VballNetV3b
+    'VballNetV3b': VballNetV3b,
+    'VballNetFastV2': VballNetFastV2,
 }
 
 
