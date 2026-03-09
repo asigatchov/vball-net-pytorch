@@ -5,6 +5,8 @@ description = "Volleyball tracking - VballNet is a specialized deep learning fra
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "av>=16.1.0",
+    "fvcore>=0.1.5.post20221221",
     "lion-pytorch>=0.2.3",
     "matplotlib>=3.10.3",
     "onnx>=1.18.0",

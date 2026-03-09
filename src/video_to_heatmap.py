@@ -9,6 +9,7 @@ Usage Examples:
     python video_to_heatmap.py --source dataset --output dataset_preprocessed
     python video_to_heatmap.py --source /path/to/data --output /path/to/output --sigma 5
     python video_to_heatmap.py --source dataset --sigma 4 --force
+    python video_to_heatmap.py --source dataset --frame_step 2  # Process every 2nd frame
 
 Dependencies:
     pip install opencv-python pandas numpy scipy tqdm
@@ -173,7 +174,7 @@ def estimate_total_frames(source_path):
 
 
 def process_video_sequence(video_path, annotation_path, inputs_output_dir, heatmaps_output_dir,
-                           sequence_name, sigma_value, progress_bar):
+                           sequence_name, sigma_value, frame_step, progress_bar):
     """Process single video sequence with corresponding annotations."""
 
     # Create output directories
@@ -201,6 +202,7 @@ def process_video_sequence(video_path, annotation_path, inputs_output_dir, heatm
 
     frames_processed = 0
     current_frame = 0
+    output_frame_index = 0  # Continuous frame numbering regardless of frame_step
     encoding_params = [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
     image_format = DEFAULT_IMAGE_FORMAT
 
@@ -218,8 +220,8 @@ def process_video_sequence(video_path, annotation_path, inputs_output_dir, heatm
             # Update progress
             progress_bar.update(1)
 
-            # Process frame if annotation exists
-            if current_frame in annotation_lookup:
+            # Process frame if annotation exists and it's selected by frame_step
+            if current_frame in annotation_lookup and current_frame % frame_step == 0:
                 annotation_row = annotation_lookup[current_frame]
 
                 # Resize frame
@@ -251,8 +253,9 @@ def process_video_sequence(video_path, annotation_path, inputs_output_dir, heatm
 
 
                 # Сохраняем кадры и тепловые карты в PNG (градации серого)
-                frame_output_path = os.path.join(sequence_inputs_dir, f"{current_frame}.png")
-                heatmap_output_path = os.path.join(sequence_heatmaps_dir, f"{current_frame}.png")
+                # Use continuous numbering for output frames
+                frame_output_path = os.path.join(sequence_inputs_dir, f"{output_frame_index}.png")
+                heatmap_output_path = os.path.join(sequence_heatmaps_dir, f"{output_frame_index}.png")
 
                 # Кадр переводим в оттенки серого
                 processed_frame_gray = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2GRAY)
@@ -260,6 +263,7 @@ def process_video_sequence(video_path, annotation_path, inputs_output_dir, heatm
                 cv2.imwrite(heatmap_output_path, heatmap)
 
                 frames_processed += 1
+                output_frame_index += 1  # Increment output frame counter
 
                 # Memory cleanup
                 del processed_frame, heatmap
@@ -276,7 +280,7 @@ def process_video_sequence(video_path, annotation_path, inputs_output_dir, heatm
     return frames_processed
 
 
-def process_match_directory(match_path, output_base_dir, sigma_value, progress_bar):
+def process_match_directory(match_path, output_base_dir, sigma_value, frame_step, progress_bar):
     """Process single match directory containing videos and annotations."""
     match_name = os.path.basename(match_path)
 
@@ -314,7 +318,7 @@ def process_match_directory(match_path, output_base_dir, sigma_value, progress_b
         if os.path.exists(annotation_path):
             frames_count = process_video_sequence(
                 video_path, annotation_path, inputs_output_dir, heatmaps_output_dir,
-                sequence_name, sigma_value, progress_bar
+                sequence_name, sigma_value, frame_step, progress_bar
             )
 
             if frames_count > 0:
@@ -326,7 +330,7 @@ def process_match_directory(match_path, output_base_dir, sigma_value, progress_b
     tqdm.write(f"Completed {match_name}: {sequences_processed} sequences, {total_frames_processed} frames")
 
 
-def preprocess_dataset(source_path, output_path, sigma_value=3.0, force_overwrite=False):
+def preprocess_dataset(source_path, output_path, sigma_value=3.0, frame_step=1, force_overwrite=False):
     """Main preprocessing pipeline for badminton dataset."""
 
     # Validate input structure
@@ -382,10 +386,10 @@ def preprocess_dataset(source_path, output_path, sigma_value=3.0, force_overwrit
     print(f"📊 Total frames to process: {total_frame_count}")
 
     # Execute preprocessing with progress tracking
-    with tqdm(total=total_frame_count, desc="Processing frames", unit="frame") as progress_bar:
+    with tqdm(total=total_frame_count // frame_step, desc="Processing frames", unit="frame") as progress_bar:
         for match_dir_name in valid_match_dirs:
             match_dir_path = os.path.join(source_path, match_dir_name)
-            process_match_directory(match_dir_path, output_path, sigma_value, progress_bar)
+            process_match_directory(match_dir_path, output_path, sigma_value, frame_step, progress_bar)
 
             # Memory cleanup after each match
             gc.collect()
@@ -394,6 +398,7 @@ def preprocess_dataset(source_path, output_path, sigma_value=3.0, force_overwrit
     print(f"   Source: {source_path}")
     print(f"   Output: {output_path}")
     print(f"   Heatmap sigma: {sigma_value}")
+    print(f"   Frame step: {frame_step} (process every {frame_step} frame(s))")
     return True
 
 
@@ -447,6 +452,13 @@ Annotation Format (rally1_ball.csv):
     )
 
     parser.add_argument(
+        "--frame_step",
+        type=int,
+        default=1,
+        help="Frame sampling step (default: 1 - process all frames, 2 - every 2nd frame, etc.)"
+    )
+
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Force overwrite existing output directory"
@@ -484,11 +496,12 @@ Annotation Format (rally1_ball.csv):
     print(f"📂 Source: {args.source}")
     print(f"📂 Output: {args.output}")
     print(f"🎯 Heatmap sigma: {args.sigma}")
+    print(f"⏭️  Frame step: {args.frame_step}")
 
 
     # Execute preprocessing
     # (Параметр args.format пока не используется, но может быть расширен в будущем)
-    success = preprocess_dataset(args.source, args.output, args.sigma, args.force)
+    success = preprocess_dataset(args.source, args.output, args.sigma, args.frame_step, args.force)
     sys.exit(0 if success else 1)
 
 

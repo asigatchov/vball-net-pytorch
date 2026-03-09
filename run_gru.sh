@@ -9,8 +9,8 @@ VAL_DATADIR=datasets/mix-vb/test_preprocessed
 DATADIR=../TrackNetV4-PyTorch/datasets/mix_volleyball_preprocessed
 VAL_DATADIR=../TrackNetV4-PyTorch/datasets/mix_volleyball_test_preprocessed
 
-DATADIR=/home/nssd/gled/vb/dataset-vb/badminton/train_preprocessed
-VAL_DATADIR=/home/nssd/gled/vb/dataset-vb/badminton/test_preprocessed
+# DATADIR=/home/nssd/gled/vb/dataset-vb/badminton/train_preprocessed
+# VAL_DATADIR=/home/nssd/gled/vb/dataset-vb/badminton/test_preprocessed
 # Run training
 uv run  src/train_gru.py \
   --data "$DATADIR" \
@@ -21,9 +21,9 @@ uv run  src/train_gru.py \
   --optimizer AdamW \
   --lr 0.001 \
   --epochs 250 \
-  --batch 24  \
+  --batch 16  \
   --scheduler ReduceLROnPlateau \
-  --workers 12 \
-  --resume ./outputs/VballNetV1c_seq15_grayscale_resumed_20251216_165901/checkpoints/VballNetV1c_seq15_grayscale_best.pth 
+  --workers 8 \
+  --resume ./outputs/VballNetV1c_seq15_grayscale_badminton/checkpoints/VballNetV1c_seq15_grayscale_best.pth
 
 echo "Training completed!"
