@@ -25,23 +25,47 @@ class VballNetGridV1a(nn.Module):
         self.in_dim = in_dim
         self.out_dim = out_dim
 
+        # self.features = nn.Sequential(
+        #     ConvBlock(in_dim, 64),
+        #     ConvBlock(64, 64),
+        #     nn.MaxPool2d(kernel_size=2, stride=2),
+        #     ConvBlock(64, 128),
+        #     ConvBlock(128, 128),
+        #     nn.MaxPool2d(kernel_size=2, stride=2),
+        #     ConvBlock(128, 256),
+        #     ConvBlock(256, 256),
+        #     nn.MaxPool2d(kernel_size=2, stride=2),
+        #     ConvBlock(256, 256),
+        #     ConvBlock(256, 256),
+        #     ConvBlock(256, 256),
+        #     nn.MaxPool2d(kernel_size=2, stride=2),
+        #     ConvBlock(256, 512),
+        #     ConvBlock(512, 512),
+        #     ConvBlock(512, 512),
+        # )
+
         self.features = nn.Sequential(
-            ConvBlock(in_dim, 64),
-            ConvBlock(64, 64),
+            # 64
+            ConvBlock(in_dim,    64),
+            ConvBlock(64,        64),
             nn.MaxPool2d(kernel_size=2, stride=2),
-            ConvBlock(64, 128),
-            ConvBlock(128, 128),
+            
+            # 128
+            ConvBlock(64,       128),
+            ConvBlock(128,      128),
             nn.MaxPool2d(kernel_size=2, stride=2),
-            ConvBlock(128, 256),
-            ConvBlock(256, 256),
+            
+            # 256 × 3
+            ConvBlock(128,      256),
+            ConvBlock(256,      256),
+            ConvBlock(256,      256),
             nn.MaxPool2d(kernel_size=2, stride=2),
-            ConvBlock(256, 256),
-            ConvBlock(256, 256),
-            ConvBlock(256, 256),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-            ConvBlock(256, 512),
-            ConvBlock(512, 512),
-            ConvBlock(512, 512),
+            
+            # 512 × 3
+            ConvBlock(256,      512),
+            ConvBlock(512,      512),
+            ConvBlock(512,      512),
+            # Нет финального MaxPool — как в оригинальной Keras-версии
         )
         self.head = nn.Conv2d(512, out_dim, kernel_size=3, padding=1)
         self.activation = nn.Sigmoid()

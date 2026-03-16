@@ -2,13 +2,17 @@
 
 import argparse
 import json
+import random
 import time
 from datetime import datetime
 from pathlib import Path
 
+import cv2
+import numpy as np
 import torch
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from model.vballnet_grid_v1a import VballNetGridV1a
@@ -19,6 +23,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="GridTrackNet training")
     parser.add_argument("--data", type=str, required=True)
     parser.add_argument("--val_data", type=str, required=True)
+    parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch", type=int, default=3)
     parser.add_argument("--workers", type=int, default=0)
@@ -158,6 +163,7 @@ class Trainer:
     def __init__(self, args):
         self.args = args
         self.device = get_device(args.device)
+        self.start_epoch = 0
         self.model = VballNetGridV1a(
             input_height=args.height,
             input_width=args.width,
@@ -179,8 +185,26 @@ class Trainer:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.save_dir = Path(args.out) / f"{args.name}_seq{args.seq}_{timestamp}"
         (self.save_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
+        (self.save_dir / "tensorboard").mkdir(exist_ok=True)
+        (self.save_dir / "val_vis").mkdir(exist_ok=True)
         with (self.save_dir / "config.json").open("w") as f:
             json.dump(vars(args), f, indent=2)
+        self.writer = SummaryWriter(log_dir=self.save_dir / "tensorboard")
+        self._load_checkpoint()
+
+    def _load_checkpoint(self):
+        if not self.args.resume:
+            return
+        checkpoint_path = Path(self.args.resume)
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        self.model.load_state_dict(checkpoint["model_state_dict"])
+        if "optimizer_state_dict" in checkpoint:
+            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        self.start_epoch = int(checkpoint.get("epoch", -1)) + 1
+        print(f"Resumed from checkpoint: {checkpoint_path}")
+        print(f"Next epoch: {self.start_epoch + 1}")
 
     def setup_data(self):
         train_ds = GridSequenceDataset(
@@ -221,6 +245,8 @@ class Trainer:
             raise RuntimeError(f"Empty training dataset: {self.args.data}")
         if len(val_ds) == 0:
             raise RuntimeError(f"Empty validation dataset: {self.args.val_data}")
+        self.train_dataset = train_ds
+        self.val_dataset = val_ds
         print(f"Train samples: {len(train_ds)}")
         print(f"Val samples: {len(val_ds)}")
 
@@ -263,10 +289,75 @@ class Trainer:
         avg_loss = total_loss / count
         return avg_loss, avg_metrics
 
+    def _decode_single_frame(self, frame_tensor):
+        pred = frame_tensor.view(3, self.args.grid_rows, self.args.grid_cols).unsqueeze(0)
+        conf_score, x, y = decode_prediction(
+            pred,
+            grid_cols=self.args.grid_cols,
+            grid_rows=self.args.grid_rows,
+            width=self.args.width,
+            height=self.args.height,
+        )
+        visible = bool((conf_score >= 0.5)[0].item())
+        if not visible:
+            return 0, -1, -1
+        return 1, int(x[0].item()), int(y[0].item())
+
+    def _draw_point_overlay(self, image, visible, x, y, color, label):
+        overlay = image.copy()
+        if visible:
+            cv2.circle(overlay, (x, y), 10, color, 2)
+            cv2.circle(overlay, (x, y), 4, color, -1)
+        cv2.putText(
+            overlay,
+            label,
+            (12, 28),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            color,
+            2,
+            cv2.LINE_AA,
+        )
+        return overlay
+
+    def _save_val_visualizations(self, epoch):
+        sample_count = min(5, len(self.val_dataset))
+        if sample_count == 0:
+            return
+
+        random_indices = random.sample(range(len(self.val_dataset)), sample_count)
+        vis_dir = self.save_dir / "val_vis"
+        self.model.eval()
+
+        with torch.no_grad():
+            for vis_idx, dataset_idx in enumerate(random_indices):
+                inputs, targets = self.val_dataset[dataset_idx]
+                outputs = self.model(inputs.unsqueeze(0).to(self.device)).squeeze(0).cpu()
+
+                frame_tiles = []
+                for frame_idx in range(self.args.seq):
+                    frame = inputs[frame_idx * 3 : (frame_idx + 1) * 3].permute(1, 2, 0).numpy()
+                    frame = np.clip(frame * 255.0, 0, 255).astype(np.uint8)
+                    frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+
+                    target_slice = targets[frame_idx * 3 : (frame_idx + 1) * 3]
+                    output_slice = outputs[frame_idx * 3 : (frame_idx + 1) * 3]
+                    gt_vis, gt_x, gt_y = self._decode_single_frame(target_slice)
+                    pred_vis, pred_x, pred_y = self._decode_single_frame(output_slice)
+
+                    gt_overlay = self._draw_point_overlay(frame_bgr, gt_vis, gt_x, gt_y, (0, 255, 0), "GT")
+                    pred_overlay = self._draw_point_overlay(frame_bgr, pred_vis, pred_x, pred_y, (0, 0, 255), "PRED")
+                    original = self._draw_point_overlay(frame_bgr, 0, -1, -1, (255, 255, 255), "ORIG")
+                    frame_tiles.append(np.vstack([original, gt_overlay, pred_overlay]))
+
+                vis_image = np.hstack(frame_tiles)
+                output_path = vis_dir / f"epoch_{epoch + 1:03d}_seq_{vis_idx + 1}.jpg"
+                cv2.imwrite(str(output_path), vis_image)
+
     def train(self):
         self.setup_data()
         best_val = float("inf")
-        for epoch in range(self.args.epochs):
+        for epoch in range(self.start_epoch, self.args.epochs):
             start = time.time()
             train_loss, train_metrics = self._run_epoch(self.train_loader, training=True)
             val_loss, val_metrics = self._run_epoch(self.val_loader, training=False)
@@ -290,6 +381,7 @@ class Trainer:
                 torch.save(checkpoint, self.save_dir / "checkpoints" / "best.pth")
 
             elapsed = time.time() - start
+            current_lr = self.optimizer.param_groups[0]["lr"]
             print(
                 f"Epoch {epoch + 1}/{self.args.epochs} "
                 f"train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
@@ -297,6 +389,17 @@ class Trainer:
                 f"time={elapsed:.1f}s"
             )
 
+            self.writer.add_scalar("Loss/Train", train_loss, epoch)
+            self.writer.add_scalar("Loss/Validation", val_loss, epoch)
+            self.writer.add_scalar("LearningRate", current_lr, epoch)
+            for metric_name, metric_value in train_metrics.items():
+                self.writer.add_scalar(f"Train/{metric_name}", metric_value, epoch)
+            for metric_name, metric_value in val_metrics.items():
+                self.writer.add_scalar(f"Validation/{metric_name}", metric_value, epoch)
+
+            self._save_val_visualizations(epoch)
+
+        self.writer.close()
         print(f"Artifacts saved to {self.save_dir}")
 
 
