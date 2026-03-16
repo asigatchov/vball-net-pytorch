@@ -34,6 +34,8 @@ IGNORED_DIRS = {'.git', '__pycache__', '.vscode', '.idea', 'node_modules'}
 # Target dimensions for processed images
 TARGET_WIDTH = 512
 TARGET_HEIGHT = 288
+GRID_TARGET_WIDTH = 768
+GRID_TARGET_HEIGHT = 432
 
 # Форматы сохранения
 FORMAT_PNG_GRAYSCALE = 'PNG_GRAYSCALE'
@@ -93,11 +95,24 @@ def resize_with_aspect_ratio(image, target_w=TARGET_WIDTH, target_h=TARGET_HEIGH
     return canvas, scale_factor, offset_x, offset_y
 
 
+def resize_stretch(image, target_w, target_h):
+    """Resize image with direct stretching."""
+    original_h, original_w = image.shape[:2]
+    resized_img = cv2.resize(image, (target_w, target_h), interpolation=cv2.INTER_AREA)
+    scale_x = target_w / original_w
+    scale_y = target_h / original_h
+    return resized_img, scale_x, scale_y
+
+
 def transform_annotation_coords(x, y, scale, offset_x, offset_y):
     """Transform annotation coordinates based on image resizing parameters."""
     transformed_x = x * scale + offset_x
     transformed_y = y * scale + offset_y
     return transformed_x, transformed_y
+
+
+def transform_annotation_coords_stretch(x, y, scale_x, scale_y):
+    return x * scale_x, y * scale_y
 
 
 def validate_dataset_structure(source_path):
@@ -330,6 +345,138 @@ def process_match_directory(match_path, output_base_dir, sigma_value, frame_step
     tqdm.write(f"Completed {match_name}: {sequences_processed} sequences, {total_frames_processed} frames")
 
 
+def process_grid_video_sequence(
+    video_path,
+    annotation_path,
+    inputs_output_dir,
+    annotations_output_dir,
+    sequence_name,
+    frame_step,
+    progress_bar,
+):
+    sequence_inputs_dir = os.path.join(inputs_output_dir, sequence_name)
+    os.makedirs(sequence_inputs_dir, exist_ok=True)
+    os.makedirs(annotations_output_dir, exist_ok=True)
+
+    try:
+        annotations_df = pd.read_csv(annotation_path)
+    except Exception as error:
+        tqdm.write(f"Error: Cannot read annotation file {annotation_path}: {error}")
+        return 0
+
+    video_stream = cv2.VideoCapture(video_path)
+    if not video_stream.isOpened():
+        tqdm.write(f"Error: Cannot open video {video_path}")
+        return 0
+
+    annotation_lookup = {}
+    for _, row in annotations_df.iterrows():
+        annotation_lookup[int(row["Frame"])] = row
+
+    transformed_rows = []
+    frames_processed = 0
+    current_frame = 0
+    output_frame_index = 0
+
+    try:
+        while True:
+            frame_available, frame_data = video_stream.read()
+            if not frame_available:
+                break
+
+            progress_bar.update(1)
+
+            if current_frame in annotation_lookup and current_frame % frame_step == 0:
+                annotation_row = annotation_lookup[current_frame]
+                processed_frame, scale_x, scale_y = resize_stretch(
+                    frame_data, GRID_TARGET_WIDTH, GRID_TARGET_HEIGHT
+                )
+
+                visibility = int(annotation_row["Visibility"])
+                if visibility == 1 and not (pd.isna(annotation_row["X"]) or pd.isna(annotation_row["Y"])):
+                    transformed_x, transformed_y = transform_annotation_coords_stretch(
+                        float(annotation_row["X"]),
+                        float(annotation_row["Y"]),
+                        scale_x,
+                        scale_y,
+                    )
+                    transformed_x = max(0.0, min(GRID_TARGET_WIDTH - 1, transformed_x))
+                    transformed_y = max(0.0, min(GRID_TARGET_HEIGHT - 1, transformed_y))
+                else:
+                    transformed_x = 0.0
+                    transformed_y = 0.0
+
+                frame_output_path = os.path.join(sequence_inputs_dir, f"{output_frame_index}.png")
+                cv2.imwrite(frame_output_path, processed_frame)
+                transformed_rows.append(
+                    {
+                        "Frame": output_frame_index,
+                        "Visibility": visibility,
+                        "X": float(transformed_x),
+                        "Y": float(transformed_y),
+                    }
+                )
+                frames_processed += 1
+                output_frame_index += 1
+
+            current_frame += 1
+            if current_frame % 100 == 0:
+                gc.collect()
+    finally:
+        video_stream.release()
+
+    if transformed_rows:
+        annotation_output_path = os.path.join(annotations_output_dir, f"{sequence_name}.csv")
+        pd.DataFrame(transformed_rows).to_csv(annotation_output_path, index=False)
+
+    return frames_processed
+
+
+def process_grid_match_directory(match_path, output_base_dir, frame_step, progress_bar):
+    match_name = os.path.basename(match_path)
+    match_output_dir = os.path.join(output_base_dir, match_name)
+    inputs_output_dir = os.path.join(match_output_dir, "inputs")
+    annotations_output_dir = os.path.join(match_output_dir, "annotations")
+
+    os.makedirs(inputs_output_dir, exist_ok=True)
+    os.makedirs(annotations_output_dir, exist_ok=True)
+
+    videos_dir = os.path.join(match_path, "video")
+    annotations_dir = os.path.join(match_path, "csv")
+    if not os.path.exists(videos_dir) or not os.path.exists(annotations_dir):
+        tqdm.write(f"Warning: Missing video or csv directory in {match_name}")
+        return
+
+    mp4_files = [f for f in os.listdir(videos_dir) if f.endswith(".mp4") and is_valid_path(f)]
+    sequences_processed = 0
+    total_frames_processed = 0
+
+    for mp4_file in mp4_files:
+        video_path = os.path.join(videos_dir, mp4_file)
+        sequence_name = Path(mp4_file).stem
+        annotation_path = os.path.join(annotations_dir, f"{sequence_name}_ball.csv")
+        if not os.path.exists(annotation_path):
+            tqdm.write(f"Warning: Annotation file not found for {mp4_file}")
+            continue
+
+        frames_count = process_grid_video_sequence(
+            video_path,
+            annotation_path,
+            inputs_output_dir,
+            annotations_output_dir,
+            sequence_name,
+            frame_step,
+            progress_bar,
+        )
+        if frames_count > 0:
+            sequences_processed += 1
+            total_frames_processed += frames_count
+
+    tqdm.write(
+        f"Completed {match_name}: {sequences_processed} sequences, {total_frames_processed} frames"
+    )
+
+
 def preprocess_dataset(source_path, output_path, sigma_value=3.0, frame_step=1, force_overwrite=False):
     """Main preprocessing pipeline for badminton dataset."""
 
@@ -402,6 +549,55 @@ def preprocess_dataset(source_path, output_path, sigma_value=3.0, frame_step=1, 
     return True
 
 
+def preprocess_grid_dataset(source_path, output_path, frame_step=1, force_overwrite=False):
+    structure_valid, validation_message = validate_dataset_structure(source_path)
+    if not structure_valid:
+        print(f"ERROR: {validation_message}")
+        return False
+
+    print(f"OK: {validation_message}")
+
+    if os.path.exists(output_path):
+        if force_overwrite:
+            shutil.rmtree(output_path)
+        else:
+            user_input = input(f"Output directory exists: {output_path}\nDelete and rebuild? (y/n): ")
+            if user_input.lower() != "y":
+                print("Operation cancelled")
+                return False
+            shutil.rmtree(output_path)
+
+    os.makedirs(output_path, exist_ok=True)
+
+    entries = [item for item in os.listdir(source_path) if is_valid_path(item)]
+    valid_match_dirs = [
+        item
+        for item in entries
+        if item.startswith("match")
+        and os.path.isdir(os.path.join(source_path, item))
+        and os.path.exists(os.path.join(source_path, item, "csv"))
+        and os.path.exists(os.path.join(source_path, item, "video"))
+    ]
+
+    if not valid_match_dirs:
+        print("ERROR: No valid match directories found")
+        return False
+
+    total_frame_count = estimate_total_frames(source_path)
+    with tqdm(total=total_frame_count // frame_step, desc="Processing frames", unit="frame") as progress_bar:
+        for match_dir_name in valid_match_dirs:
+            match_dir_path = os.path.join(source_path, match_dir_name)
+            process_grid_match_directory(match_dir_path, output_path, frame_step, progress_bar)
+            gc.collect()
+
+    print("\nGrid preprocessing completed")
+    print(f"   Source: {source_path}")
+    print(f"   Output: {output_path}")
+    print(f"   Target size: {GRID_TARGET_WIDTH}x{GRID_TARGET_HEIGHT}")
+    print(f"   Frame step: {frame_step}")
+    return True
+
+
 def main():
     """Command line interface for dataset preprocessing."""
     parser = argparse.ArgumentParser(
@@ -464,6 +660,13 @@ Annotation Format (rally1_ball.csv):
         help="Force overwrite existing output directory"
     )
 
+    parser.add_argument(
+        "--mode",
+        choices=["heatmap", "grid"],
+        default="heatmap",
+        help="Output dataset mode"
+    )
+
     # (Опционально) аргумент для формата сохранения
     parser.add_argument(
         "--format",
@@ -495,13 +698,16 @@ Annotation Format (rally1_ball.csv):
 
     print(f"📂 Source: {args.source}")
     print(f"📂 Output: {args.output}")
-    print(f"🎯 Heatmap sigma: {args.sigma}")
+    print(f"🧩 Mode: {args.mode}")
+    if args.mode == "heatmap":
+        print(f"🎯 Heatmap sigma: {args.sigma}")
     print(f"⏭️  Frame step: {args.frame_step}")
 
 
-    # Execute preprocessing
-    # (Параметр args.format пока не используется, но может быть расширен в будущем)
-    success = preprocess_dataset(args.source, args.output, args.sigma, args.frame_step, args.force)
+    if args.mode == "grid":
+        success = preprocess_grid_dataset(args.source, args.output, args.frame_step, args.force)
+    else:
+        success = preprocess_dataset(args.source, args.output, args.sigma, args.frame_step, args.force)
     sys.exit(0 if success else 1)
 
 
