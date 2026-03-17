@@ -32,6 +32,12 @@ def parse_args():
     parser.add_argument("--only_csv", action="store_true", help="Save only CSV")
     parser.add_argument("--device", type=str, default="auto", help="cpu, cuda, mps, auto")
     parser.add_argument("--threshold", type=float, default=0.5, help="Confidence threshold")
+    parser.add_argument(
+        "--compile_mode",
+        choices=["none", "reduce-overhead", "max-autotune"],
+        default="reduce-overhead",
+        help="torch.compile mode for CUDA inference",
+    )
     return parser.parse_args()
 
 
@@ -73,6 +79,33 @@ def load_model(model_path, device):
     state_dict = checkpoint.get("model_state_dict", checkpoint)
     model.load_state_dict(state_dict)
     model.eval()
+    return model
+
+
+def optimize_model_for_inference(model, device, compile_mode):
+    if device.type != "cuda":
+        return model
+
+    model = model.eval().cuda()
+    torch.backends.cudnn.benchmark = True
+    compiled_model = model
+    warmup = torch.randn(1, SEQ * 3, INPUT_HEIGHT, INPUT_WIDTH, device="cuda")
+
+    if compile_mode != "none" and hasattr(torch, "compile"):
+        try:
+            compiled_model = torch.compile(model, mode=compile_mode)
+            with torch.inference_mode():
+                for _ in range(3):
+                    _ = compiled_model(warmup)
+                torch.cuda.synchronize()
+            return compiled_model
+        except Exception as error:
+            print(f"torch.compile fallback to eager CUDA: {error}")
+
+    with torch.inference_mode():
+        for _ in range(3):
+            _ = model(warmup)
+        torch.cuda.synchronize()
     return model
 
 
@@ -167,6 +200,7 @@ def main():
     device = get_device(args.device)
 
     model = load_model(model_path, device)
+    model = optimize_model_for_inference(model, device, args.compile_mode)
     cap, frame_width, frame_height, fps, total_frames = initialize_video(video_path)
     basename = video_path.stem
     writer, _ = setup_output_writer(basename, output_dir, frame_width, frame_height, fps, args.only_csv)
@@ -202,7 +236,7 @@ def main():
             continue
 
         input_tensor = make_input_tensor(processed_buffer, device)
-        with torch.no_grad():
+        with torch.inference_mode():
             output = model(input_tensor).squeeze(0).detach().cpu().numpy()
         predictions = decode_predictions(output, args.threshold)
         visibility, x_resized, y_resized, _ = predictions[-1]
