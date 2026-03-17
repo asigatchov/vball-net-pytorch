@@ -11,6 +11,7 @@ import torch
 from tqdm import tqdm
 
 from model.vballnet_grid_v1a import VballNetGridV1a
+from model.vballnet_grid_v1c import VballNetGridV1c
 
 
 INPUT_WIDTH = 768
@@ -26,6 +27,12 @@ def parse_args():
     )
     parser.add_argument("--video_path", type=str, required=True, help="Path to input video")
     parser.add_argument("--model_path", type=str, default=None, help="Path to .pth checkpoint")
+    parser.add_argument(
+        "--model_name",
+        choices=["auto", "VballNetGridV1a", "VballNetGridV1c"],
+        default="auto",
+        help="Model architecture to instantiate",
+    )
     parser.add_argument("--track_length", type=int, default=8, help="Track length")
     parser.add_argument("--output_dir", type=str, default=None, help="Output directory")
     parser.add_argument("--visualize", action="store_true", help="Show visualization")
@@ -41,7 +48,18 @@ def parse_args():
     return parser.parse_args()
 
 
-def resolve_model_path(model_path):
+def infer_model_name(model_path, requested_model_name):
+    if requested_model_name != "auto":
+        return requested_model_name
+    model_name = Path(model_path).parent.parent.parent.name.split("_seq", 1)[0]
+    if model_name not in {"VballNetGridV1a", "VballNetGridV1c"}:
+        raise ValueError(
+            "Could not infer model_name from checkpoint path. Pass --model_name explicitly."
+        )
+    return model_name
+
+
+def resolve_model_path(model_path, model_name):
     if model_path:
         path = Path(model_path)
         if not path.exists():
@@ -49,12 +67,12 @@ def resolve_model_path(model_path):
         return path
 
     candidates = sorted(
-        Path("outputs").glob("VballNetGridV1a_seq5_*/checkpoints/best.pth"),
+        Path("outputs").glob(f"{model_name}_seq5_*/checkpoints/best.pth"),
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
     if not candidates:
-        raise FileNotFoundError("No default VballNetGridV1a checkpoint found in outputs/")
+        raise FileNotFoundError(f"No default {model_name} checkpoint found in outputs/")
     return candidates[0]
 
 
@@ -68,8 +86,12 @@ def get_device(name):
     return torch.device(name)
 
 
-def load_model(model_path, device):
-    model = VballNetGridV1a(
+def load_model(model_path, model_name, device):
+    model_cls = {
+        "VballNetGridV1a": VballNetGridV1a,
+        "VballNetGridV1c": VballNetGridV1c,
+    }[model_name]
+    model = model_cls(
         input_height=INPUT_HEIGHT,
         input_width=INPUT_WIDTH,
         in_dim=SEQ * 3,
@@ -196,10 +218,12 @@ def main():
     args = parse_args()
     video_path = Path(args.video_path)
     output_dir = Path(args.output_dir) if args.output_dir else None
-    model_path = resolve_model_path(args.model_path)
+    default_model_name = "VballNetGridV1a" if args.model_name == "auto" else args.model_name
+    model_path = resolve_model_path(args.model_path, default_model_name)
+    model_name = infer_model_name(model_path, args.model_name)
     device = get_device(args.device)
 
-    model = load_model(model_path, device)
+    model = load_model(model_path, model_name, device)
     model = optimize_model_for_inference(model, device, args.compile_mode)
     cap, frame_width, frame_height, fps, total_frames = initialize_video(video_path)
     basename = video_path.stem
@@ -276,6 +300,7 @@ def main():
         cv2.destroyAllWindows()
 
     print(f"Model: {model_path}")
+    print(f"Architecture: {model_name}")
     if output_dir:
         print(f"Output dir: {output_dir}")
 

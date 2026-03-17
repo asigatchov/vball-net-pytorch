@@ -16,6 +16,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from model.vballnet_grid_v1a import VballNetGridV1a
+from model.vballnet_grid_v1c import VballNetGridV1c
 from utils.grid_dataset import GridSequenceDataset
 
 
@@ -43,12 +44,32 @@ def parse_args():
     parser.add_argument("--grid_cols", type=int, default=48)
     parser.add_argument("--tol", type=int, default=4)
     parser.add_argument("--out", type=str, default="outputs")
-    parser.add_argument("--name", type=str, default="VballNetGridV1a")
+    parser.add_argument(
+        "--model_name",
+        choices=["VballNetGridV1a", "VballNetGridV1c"],
+        default="VballNetGridV1a",
+    )
+    parser.add_argument("--name", type=str, default=None)
     args = parser.parse_args()
 
     if args.lr is None:
         args.lr = {"Adadelta": 1.0, "Adam": 0.001, "AdamW": 0.001, "SGD": 0.01}[args.optimizer]
+    if args.name is None:
+        args.name = args.model_name
     return args
+
+
+def build_model(model_name, height, width, seq):
+    model_cls = {
+        "VballNetGridV1a": VballNetGridV1a,
+        "VballNetGridV1c": VballNetGridV1c,
+    }[model_name]
+    return model_cls(
+        input_height=height,
+        input_width=width,
+        in_dim=seq * 3,
+        out_dim=seq * 3,
+    )
 
 
 class GridTrackNetLoss(torch.nn.Module):
@@ -164,12 +185,7 @@ class Trainer:
         self.args = args
         self.device = get_device(args.device)
         self.start_epoch = 0
-        self.model = VballNetGridV1a(
-            input_height=args.height,
-            input_width=args.width,
-            in_dim=args.seq * 3,
-            out_dim=args.seq * 3,
-        ).to(self.device)
+        self.model = build_model(args.model_name, args.height, args.width, args.seq).to(self.device)
         self.criterion = GridTrackNetLoss(seq=args.seq)
         self.optimizer = create_optimizer(args, self.model)
         self.scheduler = None
