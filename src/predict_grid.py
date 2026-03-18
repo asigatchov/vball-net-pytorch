@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import time
 from collections import deque
 from pathlib import Path
 
@@ -38,6 +39,12 @@ def parse_args():
     parser.add_argument("--visualize", action="store_true", help="Show visualization")
     parser.add_argument("--only_csv", action="store_true", help="Save only CSV")
     parser.add_argument("--device", type=str, default="auto", help="cpu, cuda, mps, auto")
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=1,
+        help="Number of sliding windows to infer per PyTorch forward pass",
+    )
     parser.add_argument("--threshold", type=float, default=0.5, help="Confidence threshold")
     parser.add_argument(
         "--compile_mode",
@@ -86,13 +93,52 @@ def get_device(name):
     return torch.device(name)
 
 
+def parse_optional_bool(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off", ""}:
+            return False
+    return bool(value)
+
+
+def infer_dims_from_state_dict(state_dict):
+    for key in ("features.0.conv.weight", "stem.block.0.weight"):
+        weight = state_dict.get(key)
+        if weight is not None:
+            in_dim = int(weight.shape[1])
+            break
+    else:
+        raise KeyError("Could not infer input channels from checkpoint state_dict")
+
+    for key in ("head.weight", "head.1.weight"):
+        weight = state_dict.get(key)
+        if weight is not None:
+            out_dim = int(weight.shape[0])
+            break
+    else:
+        raise KeyError("Could not infer output channels from checkpoint state_dict")
+
+    return in_dim, out_dim
+
+
 def infer_model_params(model_path, checkpoint):
+    state_dict = checkpoint.get("model_state_dict", checkpoint)
+    inferred_in_dim, inferred_out_dim = infer_dims_from_state_dict(state_dict)
+    inferred_grayscale = inferred_in_dim % 3 != 0
+    inferred_seq = inferred_in_dim if inferred_grayscale else inferred_in_dim // 3
+
     config_path = model_path.parents[1] / "config.json"
     if config_path.exists():
         with config_path.open() as f:
             config = json.load(f)
-        seq = int(config["seq"])
-        grayscale = bool(config["grayscale"])
+        seq = int(config.get("seq", inferred_seq))
+        grayscale = parse_optional_bool(config.get("grayscale"), default=False)
         height = int(config.get("height", INPUT_HEIGHT))
         width = int(config.get("width", INPUT_WIDTH))
         grid_rows = int(config.get("grid_rows", GRID_ROWS))
@@ -106,11 +152,10 @@ def infer_model_params(model_path, checkpoint):
             "grid_cols": grid_cols,
         }
 
-    state_dict = checkpoint.get("model_state_dict", checkpoint)
-    in_dim = int(state_dict["stem.block.0.weight"].shape[0])
-    out_dim = int(state_dict["head.1.weight"].shape[0])
-    grayscale = in_dim % 3 != 0
-    seq = in_dim if grayscale else in_dim // 3
+    in_dim = inferred_in_dim
+    out_dim = inferred_out_dim
+    grayscale = inferred_grayscale
+    seq = inferred_seq
     expected_out_dim = seq * 3
     if out_dim != expected_out_dim:
         raise ValueError(
@@ -237,6 +282,20 @@ def make_input_tensor(frame_buffer, device, grayscale):
     return tensor
 
 
+def make_clip_batch(clips, device, grayscale):
+    batch = []
+    for clip_frames in clips:
+        if grayscale:
+            clip = np.stack(clip_frames, axis=0)
+        else:
+            clip = np.concatenate([np.transpose(frame, (2, 0, 1)) for frame in clip_frames], axis=0)
+        batch.append(clip.astype(np.float32, copy=False))
+    if not batch:
+        raise ValueError("Expected at least one clip for batching")
+    array = np.asarray(batch, dtype=np.float32)
+    return torch.from_numpy(array).to(device)
+
+
 def decode_predictions(output, threshold, seq, grid_rows, grid_cols, input_width, input_height):
     output = output.reshape(seq, 3, grid_rows, grid_cols)
     results = []
@@ -269,6 +328,73 @@ def draw_track(frame, track_points):
     return frame
 
 
+def flush_pending(
+    pending_frames,
+    model,
+    device,
+    seq,
+    grayscale,
+    threshold,
+    grid_rows,
+    grid_cols,
+    frame_width,
+    frame_height,
+    input_width,
+    input_height,
+    csv_path,
+    writer,
+    visualize,
+    track,
+):
+    if not pending_frames:
+        return 0.0, 0
+
+    input_batch = make_clip_batch([item["clip"] for item in pending_frames], device, grayscale)
+    start_infer = time.perf_counter()
+    with torch.inference_mode():
+        output_batch = model(input_batch).detach().cpu().numpy()
+    infer_elapsed = time.perf_counter() - start_infer
+
+    for item, output in zip(pending_frames, output_batch, strict=True):
+        predictions = decode_predictions(
+            output,
+            threshold,
+            seq,
+            grid_rows,
+            grid_cols,
+            input_width,
+            input_height,
+        )
+        visibility, x_resized, y_resized, _ = predictions[-1]
+
+        if visibility:
+            x_orig = int(x_resized * frame_width / input_width)
+            y_orig = int(y_resized * frame_height / input_height)
+            track.append((x_orig, y_orig))
+        else:
+            x_orig, y_orig = -1, -1
+            if track:
+                track.popleft()
+
+        result = {"Frame": item["frame_index"], "Visibility": visibility, "X": x_orig, "Y": y_orig}
+        append_to_csv(result, csv_path)
+
+        if writer or visualize:
+            vis_frame = draw_track(item["frame"].copy(), track)
+            if visibility:
+                cv2.circle(vis_frame, (x_orig, y_orig), 12, (0, 255, 0), 2)
+            if writer:
+                writer.write(vis_frame)
+            if visualize:
+                cv2.imshow("Grid Prediction", vis_frame)
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    raise KeyboardInterrupt
+
+    num_predictions = len(pending_frames)
+    pending_frames.clear()
+    return infer_elapsed, num_predictions
+
+
 def main():
     args = parse_args()
     video_path = Path(args.video_path)
@@ -277,6 +403,7 @@ def main():
     model_path = resolve_model_path(args.model_path, default_model_name)
     model_name = infer_model_name(model_path, args.model_name)
     device = get_device(args.device)
+    batch_size = max(1, args.batch_size)
 
     model, model_params = load_model(model_path, model_name, device)
     model = optimize_model_for_inference(model, device, args.compile_mode, model_params)
@@ -286,96 +413,124 @@ def main():
     csv_path = setup_csv_file(basename, output_dir)
 
     processed_buffer = deque(maxlen=model_params["seq"])
-    raw_buffer = deque(maxlen=model_params["seq"])
+    pending_frames = []
     track = deque(maxlen=args.track_length)
     frame_index = 0
+    total_start = time.perf_counter()
+    inference_time = 0.0
+    inference_windows = 0
 
     pbar = tqdm(total=total_frames, desc="Processing", unit="frame")
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
+    try:
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
 
-        raw_buffer.append(frame.copy())
-        processed_buffer.append(
-            preprocess_frame(
-                frame,
-                model_params["input_width"],
-                model_params["input_height"],
-                model_params["grayscale"],
+            processed_buffer.append(
+                preprocess_frame(
+                    frame,
+                    model_params["input_width"],
+                    model_params["input_height"],
+                    model_params["grayscale"],
+                )
             )
-        )
 
-        if len(processed_buffer) < model_params["seq"]:
-            result = {"Frame": frame_index, "Visibility": 0, "X": -1, "Y": -1}
-            append_to_csv(result, csv_path)
-            if writer or args.visualize:
-                vis_frame = draw_track(frame.copy(), track)
-                if writer:
-                    writer.write(vis_frame)
-                if args.visualize:
-                    cv2.imshow("Grid Prediction", vis_frame)
-                    if cv2.waitKey(1) & 0xFF == ord("q"):
-                        break
+            if len(processed_buffer) < model_params["seq"]:
+                result = {"Frame": frame_index, "Visibility": 0, "X": -1, "Y": -1}
+                append_to_csv(result, csv_path)
+                if writer or args.visualize:
+                    vis_frame = draw_track(frame.copy(), track)
+                    if writer:
+                        writer.write(vis_frame)
+                    if args.visualize:
+                        cv2.imshow("Grid Prediction", vis_frame)
+                        if cv2.waitKey(1) & 0xFF == ord("q"):
+                            return
+            else:
+                pending_frames.append(
+                    {
+                        "frame_index": frame_index,
+                        "frame": frame.copy(),
+                        "clip": list(processed_buffer),
+                    }
+                )
+                if len(pending_frames) >= batch_size:
+                    infer_elapsed, num_predictions = flush_pending(
+                        pending_frames=pending_frames,
+                        model=model,
+                        device=device,
+                        seq=model_params["seq"],
+                        grayscale=model_params["grayscale"],
+                        threshold=args.threshold,
+                        grid_rows=model_params["grid_rows"],
+                        grid_cols=model_params["grid_cols"],
+                        frame_width=frame_width,
+                        frame_height=frame_height,
+                        input_width=model_params["input_width"],
+                        input_height=model_params["input_height"],
+                        csv_path=csv_path,
+                        writer=writer,
+                        visualize=args.visualize,
+                        track=track,
+                    )
+                    inference_time += infer_elapsed
+                    inference_windows += num_predictions
+
             frame_index += 1
             pbar.update(1)
-            continue
 
-        input_tensor = make_input_tensor(processed_buffer, device, model_params["grayscale"])
-        with torch.inference_mode():
-            output = model(input_tensor).squeeze(0).detach().cpu().numpy()
-        predictions = decode_predictions(
-            output,
-            args.threshold,
-            model_params["seq"],
-            model_params["grid_rows"],
-            model_params["grid_cols"],
-            model_params["input_width"],
-            model_params["input_height"],
-        )
-        visibility, x_resized, y_resized, _ = predictions[-1]
+        if pending_frames:
+            infer_elapsed, num_predictions = flush_pending(
+                pending_frames=pending_frames,
+                model=model,
+                device=device,
+                seq=model_params["seq"],
+                grayscale=model_params["grayscale"],
+                threshold=args.threshold,
+                grid_rows=model_params["grid_rows"],
+                grid_cols=model_params["grid_cols"],
+                frame_width=frame_width,
+                frame_height=frame_height,
+                input_width=model_params["input_width"],
+                input_height=model_params["input_height"],
+                csv_path=csv_path,
+                writer=writer,
+                visualize=args.visualize,
+                track=track,
+            )
+            inference_time += infer_elapsed
+            inference_windows += num_predictions
+    finally:
+        pbar.close()
+        cap.release()
+        if writer:
+            writer.release()
+        if args.visualize:
+            cv2.destroyAllWindows()
 
-        if visibility:
-            x_orig = int(x_resized * frame_width / model_params["input_width"])
-            y_orig = int(y_resized * frame_height / model_params["input_height"])
-            track.append((x_orig, y_orig))
-        else:
-            x_orig, y_orig = -1, -1
-            if track:
-                track.popleft()
-
-        result = {"Frame": frame_index, "Visibility": visibility, "X": x_orig, "Y": y_orig}
-        append_to_csv(result, csv_path)
-
-        if writer or args.visualize:
-            vis_frame = frame.copy()
-            vis_frame = draw_track(vis_frame, track)
-            if visibility:
-                cv2.circle(vis_frame, (x_orig, y_orig), 12, (0, 255, 0), 2)
-            if writer:
-                writer.write(vis_frame)
-            if args.visualize:
-                cv2.imshow("Grid Prediction", vis_frame)
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    break
-
-        frame_index += 1
-        pbar.update(1)
-
-    pbar.close()
-    cap.release()
-    if writer:
-        writer.release()
-    if args.visualize:
-        cv2.destroyAllWindows()
+    total_time = time.perf_counter() - total_start
+    pipeline_fps_frames = frame_index / total_time if total_time > 0 else 0.0
+    pipeline_fps_windows = inference_windows / total_time if total_time > 0 else 0.0
+    infer_fps_windows = inference_windows / inference_time if inference_time > 0 else 0.0
+    infer_ms_per_window = (inference_time / inference_windows * 1000.0) if inference_windows else 0.0
 
     print(f"Model: {model_path}")
     print(f"Architecture: {model_name}")
     print(
         "Input params: "
         f"seq={model_params['seq']}, grayscale={model_params['grayscale']}, "
-        f"size={model_params['input_width']}x{model_params['input_height']}"
+        f"size={model_params['input_width']}x{model_params['input_height']}, "
+        f"batch_size={batch_size}"
     )
+    print(f"Processed frames: {frame_index}")
+    print(f"Inference windows: {inference_windows}")
+    print(f"Total time, s: {total_time:.2f}")
+    print(f"Pipeline FPS, frames/s: {pipeline_fps_frames:.2f}")
+    print(f"Pipeline FPS, windows/s: {pipeline_fps_windows:.2f}")
+    print(f"Inference time, s: {inference_time:.2f}")
+    print(f"Inference FPS, windows/s: {infer_fps_windows:.2f}")
+    print(f"Inference latency, ms/window: {infer_ms_per_window:.2f}")
     if output_dir:
         print(f"Output dir: {output_dir}")
 
