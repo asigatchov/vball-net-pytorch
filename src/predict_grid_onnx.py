@@ -3,6 +3,7 @@
 import argparse
 import csv
 import os
+import time
 from collections import deque
 from pathlib import Path
 
@@ -16,7 +17,6 @@ INPUT_WIDTH = 768
 INPUT_HEIGHT = 432
 GRID_COLS = 48
 GRID_ROWS = 27
-SEQ = 5
 
 
 def parse_args():
@@ -39,7 +39,7 @@ def parse_args():
         "--batch_size",
         type=int,
         default=1,
-        help="Number of 5-frame clips to infer per ONNX call; CPU often works best with 1",
+        help="Number of sliding windows to infer per ONNX call; CPU often works best with 1",
     )
     parser.add_argument("--threshold", type=float, default=0.5, help="Confidence threshold")
     return parser.parse_args()
@@ -94,6 +94,40 @@ def load_session(model_path, device):
     return session, input_name
 
 
+def infer_model_params(model_path, session):
+    input_meta = session.get_inputs()[0]
+    output_meta = session.get_outputs()[0]
+
+    input_shape = input_meta.shape
+    output_shape = output_meta.shape
+    in_dim = input_shape[1]
+    out_dim = output_shape[1]
+
+    if not isinstance(in_dim, int) or not isinstance(out_dim, int):
+        raise ValueError(
+            f"Static channel dimensions are required, got input={input_shape}, output={output_shape}"
+        )
+
+    model_name = model_path.name.lower()
+    grayscale = "grayscale" in model_name
+    if not grayscale and in_dim % 3 != 0:
+        grayscale = True
+
+    seq = in_dim if grayscale else in_dim // 3
+    expected_out_dim = seq * 3
+    if out_dim != expected_out_dim:
+        raise ValueError(
+            f"Unexpected output channels: got {out_dim}, expected {expected_out_dim} for seq={seq}"
+        )
+
+    return {
+        "seq": seq,
+        "grayscale": grayscale,
+        "input_height": input_shape[2],
+        "input_width": input_shape[3],
+    }
+
+
 def initialize_video(video_path):
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -139,63 +173,112 @@ def is_headless():
     return not any(os.environ.get(name) for name in ("DISPLAY", "WAYLAND_DISPLAY"))
 
 
-def preprocess_frames(frames):
-    batches = []
-    for start in range(0, len(frames), SEQ):
-        batch = frames[start:start + SEQ]
-        if len(batch) == SEQ:
-            batches.append(batch)
-
-    units = []
-    for batch in batches:
-        unit = []
-        for frame in batch:
-            frame = cv2.resize(frame, (INPUT_WIDTH, INPUT_HEIGHT))
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frame = np.moveaxis(frame, -1, 0)
-            unit.append(frame[0])
-            unit.append(frame[1])
-            unit.append(frame[2])
-        units.append(unit)
-
-    if not units:
-        return np.empty((0, SEQ * 3, INPUT_HEIGHT, INPUT_WIDTH), dtype=np.float32), 0
-
-    batch = np.asarray(units, dtype=np.float32)
-    batch /= 255.0
-    return batch, len(units) * SEQ
+def preprocess_frame(frame, input_width, input_height, grayscale):
+    resized = cv2.resize(frame, (input_width, input_height), interpolation=cv2.INTER_AREA)
+    if grayscale:
+        gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+        return gray.astype(np.float32) / 255.0
+    rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+    return rgb.astype(np.float32) / 255.0
 
 
-def decode_clip_predictions(output, threshold, frame_width, frame_height):
-    output = np.split(output, SEQ, axis=1)
-    output = np.stack(output, axis=2)
-    output = np.moveaxis(output, 1, -1)
+def make_clip_batch(clips, grayscale):
+    batch = []
+    for clip_frames in clips:
+        if grayscale:
+            clip = np.stack(clip_frames, axis=0)
+        else:
+            clip = np.concatenate([np.transpose(frame, (2, 0, 1)) for frame in clip_frames], axis=0)
+        batch.append(clip.astype(np.float32, copy=False))
+    if not batch:
+        raise ValueError("Expected at least one clip for batching")
+    return np.asarray(batch, dtype=np.float32)
 
-    conf_grid, x_offset_grid, y_offset_grid = np.split(output, 3, axis=-1)
-    conf_grid = np.squeeze(conf_grid, axis=-1)
-    x_offset_grid = np.squeeze(x_offset_grid, axis=-1)
-    y_offset_grid = np.squeeze(y_offset_grid, axis=-1)
+
+def flush_pending(
+    pending_frames,
+    session,
+    input_name,
+    seq,
+    grayscale,
+    threshold,
+    frame_width,
+    frame_height,
+    input_width,
+    input_height,
+    csv_writer,
+    writer,
+    visualize,
+    track,
+):
+    if not pending_frames:
+        return 0.0, 0
+
+    clips = make_clip_batch([item["clip"] for item in pending_frames], grayscale=grayscale)
+    start_infer = time.perf_counter()
+    output = session.run(None, {input_name: clips})[0]
+    infer_elapsed = time.perf_counter() - start_infer
+
+    predictions = decode_last_predictions(
+        output,
+        seq=seq,
+        threshold=threshold,
+        frame_width=frame_width,
+        frame_height=frame_height,
+        input_width=input_width,
+        input_height=input_height,
+    )
+
+    for item, prediction in zip(pending_frames, predictions, strict=True):
+        visibility, x_orig, y_orig, _ = prediction
+        if visibility:
+            track.append((x_orig, y_orig))
+        else:
+            if track:
+                track.popleft()
+
+        append_to_csv(csv_writer, item["frame_index"], visibility, x_orig, y_orig)
+
+        if writer or visualize:
+            vis_frame = draw_track(item["frame"].copy(), track)
+            if visibility:
+                cv2.circle(vis_frame, (x_orig, y_orig), 12, (0, 255, 0), 2)
+            if writer:
+                writer.write(vis_frame)
+            if visualize:
+                cv2.imshow("Grid Prediction ONNX", vis_frame)
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    raise KeyboardInterrupt
+
+    pending_frames.clear()
+    return infer_elapsed, len(predictions)
+
+
+def decode_last_predictions(output, seq, threshold, frame_width, frame_height, input_width, input_height):
+    output = output.reshape(output.shape[0], seq, 3, GRID_ROWS, GRID_COLS)
+    output = output[:, -1]
 
     results = []
-    for batch_index in range(conf_grid.shape[0]):
-        for frame_index in range(conf_grid.shape[1]):
-            curr_conf_grid = conf_grid[batch_index][frame_index]
-            curr_x_offset_grid = x_offset_grid[batch_index][frame_index]
-            curr_y_offset_grid = y_offset_grid[batch_index][frame_index]
+    for batch_index in range(output.shape[0]):
+        conf_grid = output[batch_index, 0]
+        x_offset_grid = output[batch_index, 1]
+        y_offset_grid = output[batch_index, 2]
 
-            max_conf_val = float(np.max(curr_conf_grid))
-            pred_row, pred_col = np.unravel_index(np.argmax(curr_conf_grid), curr_conf_grid.shape)
-            if max_conf_val < threshold:
-                results.append((0, -1, -1))
-                continue
+        max_conf_val = float(np.max(conf_grid))
+        pred_row, pred_col = np.unravel_index(np.argmax(conf_grid), conf_grid.shape)
+        if max_conf_val < threshold:
+            results.append((0, -1, -1, max_conf_val))
+            continue
 
-            x_offset = curr_x_offset_grid[pred_row][pred_col]
-            y_offset = curr_y_offset_grid[pred_row][pred_col]
-            x_pred = int((x_offset + pred_col) * (INPUT_WIDTH / GRID_COLS))
-            y_pred = int((y_offset + pred_row) * (INPUT_HEIGHT / GRID_ROWS))
-            x_orig = int((x_pred / INPUT_WIDTH) * frame_width)
-            y_orig = int((y_pred / INPUT_HEIGHT) * frame_height)
-            results.append((1, x_orig, y_orig))
+        x_offset = float(x_offset_grid[pred_row, pred_col])
+        y_offset = float(y_offset_grid[pred_row, pred_col])
+        x_pred = (x_offset + pred_col) * (input_width / GRID_COLS)
+        y_pred = (y_offset + pred_row) * (input_height / GRID_ROWS)
+        x_pred = int(np.clip(x_pred, 0, input_width - 1))
+        y_pred = int(np.clip(y_pred, 0, input_height - 1))
+        x_orig = int(x_pred * frame_width / input_width)
+        y_orig = int(y_pred * frame_height / input_height)
+        results.append((1, x_orig, y_orig, max_conf_val))
 
     return results
 
@@ -213,66 +296,81 @@ def draw_track(frame, track_points):
 def main():
     args = parse_args()
     video_path = Path(args.video_path)
-    output_dir = Path(args.output_dir) if args.output_dir else None
     model_path = resolve_model_path(args.model_path)
     visualize = args.visualize and not is_headless()
     if args.visualize and not visualize:
         print("Visualization disabled: headless environment detected")
-    batch_size = max(1, args.batch_size) * SEQ
 
     session, input_name = load_session(model_path, args.device)
+    model_params = infer_model_params(model_path, session)
+    seq = model_params["seq"]
+    grayscale = model_params["grayscale"]
+    input_height = model_params["input_height"]
+    input_width = model_params["input_width"]
+    output_dir = Path(args.output_dir) if args.output_dir else (video_path.parent if args.only_csv else None)
+    batch_size = max(1, args.batch_size)
+
     cap, frame_width, frame_height, fps, total_frames = initialize_video(video_path)
     basename = video_path.stem
     writer, _ = setup_output_writer(basename, output_dir, frame_width, frame_height, fps, args.only_csv)
     csv_file, csv_writer = setup_csv_file(basename, output_dir)
 
+    processed_buffer = deque(maxlen=seq)
+    pending_frames = []
     track = deque(maxlen=args.track_length)
     frame_index = 0
+    total_start = time.perf_counter()
+    inference_time = 0.0
+    inference_windows = 0
 
     pbar = tqdm(total=total_frames, desc="Processing", unit="frame")
     try:
         while cap.isOpened():
-            chunk_frames = []
-            while len(chunk_frames) < batch_size:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                chunk_frames.append(frame)
-            if not chunk_frames:
+            ret, frame = cap.read()
+            if not ret:
                 break
 
-            processed_chunk, usable_frames = preprocess_frames(chunk_frames)
-            predictions = []
-            if usable_frames:
-                output = session.run(None, {input_name: processed_chunk})[0]
-                predictions = decode_clip_predictions(
-                    output,
-                    args.threshold,
-                    frame_width,
-                    frame_height,
+            processed = preprocess_frame(frame, input_width, input_height, grayscale)
+            processed_buffer.append(processed)
+
+            if len(processed_buffer) < seq:
+                visibility = 0
+                x_orig, y_orig = -1, -1
+                if track:
+                    track.popleft()
+            else:
+                pending_frames.append(
+                    {
+                        "frame_index": frame_index,
+                        "frame": frame.copy(),
+                        "clip": list(processed_buffer),
+                    }
                 )
-                if len(predictions) != usable_frames:
-                    raise RuntimeError(
-                        f"Prediction/frame mismatch: got {len(predictions)} predictions for "
-                        f"{usable_frames} frames"
+                if len(pending_frames) >= batch_size:
+                    infer_elapsed, num_predictions = flush_pending(
+                        pending_frames=pending_frames,
+                        session=session,
+                        input_name=input_name,
+                        seq=seq,
+                        grayscale=grayscale,
+                        threshold=args.threshold,
+                        frame_width=frame_width,
+                        frame_height=frame_height,
+                        input_width=input_width,
+                        input_height=input_height,
+                        csv_writer=csv_writer,
+                        writer=writer,
+                        visualize=visualize,
+                        track=track,
                     )
+                    inference_time += infer_elapsed
+                    inference_windows += num_predictions
+                visibility = None
+                x_orig = None
+                y_orig = None
 
-            for offset, frame in enumerate(chunk_frames):
-                if offset < usable_frames:
-                    visibility, x_orig, y_orig = predictions[offset]
-                    if visibility:
-                        track.append((x_orig, y_orig))
-                    else:
-                        if track:
-                            track.popleft()
-                else:
-                    visibility = 0
-                    x_orig, y_orig = -1, -1
-                    if track:
-                        track.popleft()
-
+            if visibility is not None:
                 append_to_csv(csv_writer, frame_index, visibility, x_orig, y_orig)
-
                 if writer or visualize:
                     vis_frame = draw_track(frame.copy(), track)
                     if visibility:
@@ -284,8 +382,28 @@ def main():
                         if cv2.waitKey(1) & 0xFF == ord("q"):
                             return
 
-                frame_index += 1
-                pbar.update(1)
+            frame_index += 1
+            pbar.update(1)
+
+        if pending_frames:
+            infer_elapsed, num_predictions = flush_pending(
+                pending_frames=pending_frames,
+                session=session,
+                input_name=input_name,
+                seq=seq,
+                grayscale=grayscale,
+                threshold=args.threshold,
+                frame_width=frame_width,
+                frame_height=frame_height,
+                input_width=input_width,
+                input_height=input_height,
+                csv_writer=csv_writer,
+                writer=writer,
+                visualize=visualize,
+                track=track,
+            )
+            inference_time += infer_elapsed
+            inference_windows += num_predictions
     finally:
         pbar.close()
         cap.release()
@@ -296,8 +414,25 @@ def main():
         if visualize:
             cv2.destroyAllWindows()
 
+    total_time = time.perf_counter() - total_start
+    pipeline_fps_frames = frame_index / total_time if total_time > 0 else 0.0
+    pipeline_fps_windows = inference_windows / total_time if total_time > 0 else 0.0
+    infer_fps_windows = inference_windows / inference_time if inference_time > 0 else 0.0
+    infer_ms_per_window = (inference_time / inference_windows * 1000.0) if inference_windows else 0.0
+
     print(f"Model: {model_path}")
     print(f"Providers: {session.get_providers()}")
+    print(
+        f"Input: seq={seq}, grayscale={grayscale}, size={input_width}x{input_height}, batch_size={batch_size}"
+    )
+    print(f"Processed frames: {frame_index}")
+    print(f"Inference windows: {inference_windows}")
+    print(f"Total time, s: {total_time:.2f}")
+    print(f"Pipeline FPS, frames/s: {pipeline_fps_frames:.2f}")
+    print(f"Pipeline FPS, windows/s: {pipeline_fps_windows:.2f}")
+    print(f"Inference time, s: {inference_time:.2f}")
+    print(f"Inference FPS, windows/s: {infer_fps_windows:.2f}")
+    print(f"Inference latency, ms/window: {infer_ms_per_window:.2f}")
     if output_dir:
         print(f"Output dir: {output_dir}")
 

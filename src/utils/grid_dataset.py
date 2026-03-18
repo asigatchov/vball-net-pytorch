@@ -19,6 +19,7 @@ class GridSequenceDataset(Dataset):
         grid_rows=27,
         grid_cols=48,
         augment=False,
+        grayscale=False,
     ):
         self.root_dir = Path(root_dir)
         self.seq = seq
@@ -28,6 +29,7 @@ class GridSequenceDataset(Dataset):
         self.grid_rows = grid_rows
         self.grid_cols = grid_cols
         self.augment = augment
+        self.grayscale = grayscale
         self.grid_size_col = width / grid_cols
         self.grid_size_row = height / grid_rows
         self.samples = self._scan_dataset()
@@ -116,16 +118,26 @@ class GridSequenceDataset(Dataset):
         targets = []
 
         for frame_path, row in zip(sample["frame_paths"], sample["rows"]):
-            image = cv2.imread(str(frame_path), cv2.IMREAD_COLOR)
+            read_mode = cv2.IMREAD_GRAYSCALE if self.grayscale else cv2.IMREAD_COLOR
+            image = cv2.imread(str(frame_path), read_mode)
             if image is None:
-                image = np.zeros((self.height, self.width, 3), dtype=np.uint8)
+                if self.grayscale:
+                    image = np.zeros((self.height, self.width), dtype=np.uint8)
+                else:
+                    image = np.zeros((self.height, self.width, 3), dtype=np.uint8)
             else:
                 image = cv2.resize(image, (self.width, self.height))
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            if flipped:
-                image = np.ascontiguousarray(np.flip(image, axis=1))
-            image = image.astype(np.float32) / 255.0
-            image = np.transpose(image, (2, 0, 1))
+            if self.grayscale:
+                if flipped:
+                    image = np.ascontiguousarray(np.flip(image, axis=1))
+                image = image.astype(np.float32) / 255.0
+                image = image[None, ...]
+            else:
+                image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                if flipped:
+                    image = np.ascontiguousarray(np.flip(image, axis=1))
+                image = image.astype(np.float32) / 255.0
+                image = np.transpose(image, (2, 0, 1))
             frames.append(image)
             targets.append(self._make_target(row, flipped=flipped))
 

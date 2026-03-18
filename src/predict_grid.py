@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import json
 from collections import deque
 from pathlib import Path
 
@@ -18,7 +19,6 @@ INPUT_WIDTH = 768
 INPUT_HEIGHT = 432
 GRID_COLS = 48
 GRID_ROWS = 27
-SEQ = 5
 
 
 def parse_args():
@@ -86,32 +86,81 @@ def get_device(name):
     return torch.device(name)
 
 
+def infer_model_params(model_path, checkpoint):
+    config_path = model_path.parents[1] / "config.json"
+    if config_path.exists():
+        with config_path.open() as f:
+            config = json.load(f)
+        seq = int(config["seq"])
+        grayscale = bool(config["grayscale"])
+        height = int(config.get("height", INPUT_HEIGHT))
+        width = int(config.get("width", INPUT_WIDTH))
+        grid_rows = int(config.get("grid_rows", GRID_ROWS))
+        grid_cols = int(config.get("grid_cols", GRID_COLS))
+        return {
+            "seq": seq,
+            "grayscale": grayscale,
+            "input_height": height,
+            "input_width": width,
+            "grid_rows": grid_rows,
+            "grid_cols": grid_cols,
+        }
+
+    state_dict = checkpoint.get("model_state_dict", checkpoint)
+    in_dim = int(state_dict["stem.block.0.weight"].shape[0])
+    out_dim = int(state_dict["head.1.weight"].shape[0])
+    grayscale = in_dim % 3 != 0
+    seq = in_dim if grayscale else in_dim // 3
+    expected_out_dim = seq * 3
+    if out_dim != expected_out_dim:
+        raise ValueError(
+            f"Could not infer model parameters from checkpoint: in_dim={in_dim}, out_dim={out_dim}"
+        )
+    return {
+        "seq": seq,
+        "grayscale": grayscale,
+        "input_height": INPUT_HEIGHT,
+        "input_width": INPUT_WIDTH,
+        "grid_rows": GRID_ROWS,
+        "grid_cols": GRID_COLS,
+    }
+
+
 def load_model(model_path, model_name, device):
     model_cls = {
         "VballNetGridV1a": VballNetGridV1a,
         "VballNetGridV1c": VballNetGridV1c,
     }[model_name]
-    model = model_cls(
-        input_height=INPUT_HEIGHT,
-        input_width=INPUT_WIDTH,
-        in_dim=SEQ * 3,
-        out_dim=SEQ * 3,
-    ).to(device)
     checkpoint = torch.load(model_path, map_location=device)
+    model_params = infer_model_params(model_path, checkpoint)
+    in_dim = model_params["seq"] if model_params["grayscale"] else model_params["seq"] * 3
+    model = model_cls(
+        input_height=model_params["input_height"],
+        input_width=model_params["input_width"],
+        in_dim=in_dim,
+        out_dim=model_params["seq"] * 3,
+    ).to(device)
     state_dict = checkpoint.get("model_state_dict", checkpoint)
     model.load_state_dict(state_dict)
     model.eval()
-    return model
+    return model, model_params
 
 
-def optimize_model_for_inference(model, device, compile_mode):
+def optimize_model_for_inference(model, device, compile_mode, model_params):
     if device.type != "cuda":
         return model
 
     model = model.eval().cuda()
     torch.backends.cudnn.benchmark = True
     compiled_model = model
-    warmup = torch.randn(1, SEQ * 3, INPUT_HEIGHT, INPUT_WIDTH, device="cuda")
+    input_channels = model_params["seq"] if model_params["grayscale"] else model_params["seq"] * 3
+    warmup = torch.randn(
+        1,
+        input_channels,
+        model_params["input_height"],
+        model_params["input_width"],
+        device="cuda",
+    )
 
     if compile_mode != "none" and hasattr(torch, "compile"):
         try:
@@ -170,36 +219,42 @@ def append_to_csv(result, csv_path):
         pd.DataFrame([result]).to_csv(csv_path, mode="a", header=False, index=False)
 
 
-def preprocess_frame(frame):
-    resized = cv2.resize(frame, (INPUT_WIDTH, INPUT_HEIGHT), interpolation=cv2.INTER_AREA)
+def preprocess_frame(frame, input_width, input_height, grayscale):
+    resized = cv2.resize(frame, (input_width, input_height), interpolation=cv2.INTER_AREA)
+    if grayscale:
+        gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+        return gray.astype(np.float32) / 255.0
     rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
     return rgb.astype(np.float32) / 255.0
 
 
-def make_input_tensor(frame_buffer, device):
-    stacked = np.concatenate([np.transpose(frame, (2, 0, 1)) for frame in frame_buffer], axis=0)
+def make_input_tensor(frame_buffer, device, grayscale):
+    if grayscale:
+        stacked = np.stack(frame_buffer, axis=0)
+    else:
+        stacked = np.concatenate([np.transpose(frame, (2, 0, 1)) for frame in frame_buffer], axis=0)
     tensor = torch.from_numpy(stacked).unsqueeze(0).float().to(device)
     return tensor
 
 
-def decode_predictions(output, threshold):
-    output = output.reshape(SEQ, 3, GRID_ROWS, GRID_COLS)
+def decode_predictions(output, threshold, seq, grid_rows, grid_cols, input_width, input_height):
+    output = output.reshape(seq, 3, grid_rows, grid_cols)
     results = []
-    for frame_idx in range(SEQ):
+    for frame_idx in range(seq):
         conf = output[frame_idx, 0]
         x_offset = output[frame_idx, 1]
         y_offset = output[frame_idx, 2]
         max_index = int(np.argmax(conf))
-        row = max_index // GRID_COLS
-        col = max_index % GRID_COLS
+        row = max_index // grid_cols
+        col = max_index % grid_cols
         conf_score = float(conf[row, col])
         if conf_score < threshold:
             results.append((0, -1, -1, conf_score))
             continue
-        x = (col + float(x_offset[row, col])) * (INPUT_WIDTH / GRID_COLS)
-        y = (row + float(y_offset[row, col])) * (INPUT_HEIGHT / GRID_ROWS)
-        x = int(np.clip(x, 0, INPUT_WIDTH - 1))
-        y = int(np.clip(y, 0, INPUT_HEIGHT - 1))
+        x = (col + float(x_offset[row, col])) * (input_width / grid_cols)
+        y = (row + float(y_offset[row, col])) * (input_height / grid_rows)
+        x = int(np.clip(x, 0, input_width - 1))
+        y = int(np.clip(y, 0, input_height - 1))
         results.append((1, x, y, conf_score))
     return results
 
@@ -223,15 +278,15 @@ def main():
     model_name = infer_model_name(model_path, args.model_name)
     device = get_device(args.device)
 
-    model = load_model(model_path, model_name, device)
-    model = optimize_model_for_inference(model, device, args.compile_mode)
+    model, model_params = load_model(model_path, model_name, device)
+    model = optimize_model_for_inference(model, device, args.compile_mode, model_params)
     cap, frame_width, frame_height, fps, total_frames = initialize_video(video_path)
     basename = video_path.stem
     writer, _ = setup_output_writer(basename, output_dir, frame_width, frame_height, fps, args.only_csv)
     csv_path = setup_csv_file(basename, output_dir)
 
-    processed_buffer = deque(maxlen=SEQ)
-    raw_buffer = deque(maxlen=SEQ)
+    processed_buffer = deque(maxlen=model_params["seq"])
+    raw_buffer = deque(maxlen=model_params["seq"])
     track = deque(maxlen=args.track_length)
     frame_index = 0
 
@@ -242,9 +297,16 @@ def main():
             break
 
         raw_buffer.append(frame.copy())
-        processed_buffer.append(preprocess_frame(frame))
+        processed_buffer.append(
+            preprocess_frame(
+                frame,
+                model_params["input_width"],
+                model_params["input_height"],
+                model_params["grayscale"],
+            )
+        )
 
-        if len(processed_buffer) < SEQ:
+        if len(processed_buffer) < model_params["seq"]:
             result = {"Frame": frame_index, "Visibility": 0, "X": -1, "Y": -1}
             append_to_csv(result, csv_path)
             if writer or args.visualize:
@@ -259,15 +321,23 @@ def main():
             pbar.update(1)
             continue
 
-        input_tensor = make_input_tensor(processed_buffer, device)
+        input_tensor = make_input_tensor(processed_buffer, device, model_params["grayscale"])
         with torch.inference_mode():
             output = model(input_tensor).squeeze(0).detach().cpu().numpy()
-        predictions = decode_predictions(output, args.threshold)
+        predictions = decode_predictions(
+            output,
+            args.threshold,
+            model_params["seq"],
+            model_params["grid_rows"],
+            model_params["grid_cols"],
+            model_params["input_width"],
+            model_params["input_height"],
+        )
         visibility, x_resized, y_resized, _ = predictions[-1]
 
         if visibility:
-            x_orig = int(x_resized * frame_width / INPUT_WIDTH)
-            y_orig = int(y_resized * frame_height / INPUT_HEIGHT)
+            x_orig = int(x_resized * frame_width / model_params["input_width"])
+            y_orig = int(y_resized * frame_height / model_params["input_height"])
             track.append((x_orig, y_orig))
         else:
             x_orig, y_orig = -1, -1
@@ -301,6 +371,11 @@ def main():
 
     print(f"Model: {model_path}")
     print(f"Architecture: {model_name}")
+    print(
+        "Input params: "
+        f"seq={model_params['seq']}, grayscale={model_params['grayscale']}, "
+        f"size={model_params['input_width']}x{model_params['input_height']}"
+    )
     if output_dir:
         print(f"Output dir: {output_dir}")
 

@@ -37,6 +37,7 @@ def parse_args():
     parser.add_argument("--patience", type=int, default=3)
     parser.add_argument("--min_lr", type=float, default=1e-6)
     parser.add_argument("--seq", type=int, default=5)
+    parser.add_argument("--grayscale", action="store_true")
     parser.add_argument("--stride", type=int, default=2)
     parser.add_argument("--height", type=int, default=432)
     parser.add_argument("--width", type=int, default=768)
@@ -59,15 +60,16 @@ def parse_args():
     return args
 
 
-def build_model(model_name, height, width, seq):
+def build_model(model_name, height, width, seq, grayscale):
     model_cls = {
         "VballNetGridV1a": VballNetGridV1a,
         "VballNetGridV1c": VballNetGridV1c,
     }[model_name]
+    in_dim = seq if grayscale else seq * 3
     return model_cls(
         input_height=height,
         input_width=width,
-        in_dim=seq * 3,
+        in_dim=in_dim,
         out_dim=seq * 3,
     )
 
@@ -185,7 +187,13 @@ class Trainer:
         self.args = args
         self.device = get_device(args.device)
         self.start_epoch = 0
-        self.model = build_model(args.model_name, args.height, args.width, args.seq).to(self.device)
+        self.model = build_model(
+            args.model_name,
+            args.height,
+            args.width,
+            args.seq,
+            args.grayscale,
+        ).to(self.device)
         self.criterion = GridTrackNetLoss(seq=args.seq)
         self.optimizer = create_optimizer(args, self.model)
         self.scheduler = None
@@ -199,7 +207,8 @@ class Trainer:
             )
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.save_dir = Path(args.out) / f"{args.name}_seq{args.seq}_{timestamp}"
+        model_tag = f"{args.name}_seq{args.seq}" + ("_grayscale" if args.grayscale else "")
+        self.save_dir = Path(args.out) / f"{model_tag}_{timestamp}"
         (self.save_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
         (self.save_dir / "tensorboard").mkdir(exist_ok=True)
         (self.save_dir / "val_vis").mkdir(exist_ok=True)
@@ -232,6 +241,7 @@ class Trainer:
             grid_rows=self.args.grid_rows,
             grid_cols=self.args.grid_cols,
             augment=True,
+            grayscale=self.args.grayscale,
         )
         val_ds = GridSequenceDataset(
             self.args.val_data,
@@ -242,6 +252,7 @@ class Trainer:
             grid_rows=self.args.grid_rows,
             grid_cols=self.args.grid_cols,
             augment=False,
+            grayscale=self.args.grayscale,
         )
         self.train_loader = DataLoader(
             train_ds,
@@ -352,9 +363,14 @@ class Trainer:
 
                 frame_tiles = []
                 for frame_idx in range(self.args.seq):
-                    frame = inputs[frame_idx * 3 : (frame_idx + 1) * 3].permute(1, 2, 0).numpy()
-                    frame = np.clip(frame * 255.0, 0, 255).astype(np.uint8)
-                    frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                    if self.args.grayscale:
+                        frame = inputs[frame_idx].numpy()
+                        frame = np.clip(frame * 255.0, 0, 255).astype(np.uint8)
+                        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+                    else:
+                        frame = inputs[frame_idx * 3 : (frame_idx + 1) * 3].permute(1, 2, 0).numpy()
+                        frame = np.clip(frame * 255.0, 0, 255).astype(np.uint8)
+                        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
                     target_slice = targets[frame_idx * 3 : (frame_idx + 1) * 3]
                     output_slice = outputs[frame_idx * 3 : (frame_idx + 1) * 3]
