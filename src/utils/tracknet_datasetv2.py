@@ -46,12 +46,12 @@ class FrameHeatmapDataset(Dataset):
 
         # Define augmentation pipeline for inputs (RGB images)
         self.transform = transform or transforms.Compose(
-            [transforms.ToTensor()]  # Нормализация в [0,1]
+            [transforms.ToTensor()]  # Normalize to [0,1]
         )
 
         # Define augmentation pipeline for heatmaps (grayscale)
         self.heatmap_transform = heatmap_transform or transforms.Compose(
-            [transforms.ToTensor()]  # Нормализация в [0,1]
+            [transforms.ToTensor()]  # Normalize to [0,1]
         )
 
         self.data_items = self._scan_dataset()

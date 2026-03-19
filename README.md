@@ -3,14 +3,14 @@ Pytorch Ball tracking. Volleyball tracking - VballNet is a specialized deep lear
 
 ## Grid Version
 
-### 1. Подготовка данных для grid-модели
+### 1. Prepare data for the grid model
 
-Grid-версия использует отдельный формат данных:
-- входные кадры `768x432`
-- последовательность `5` RGB-кадров
-- разметка в виде `grid confidence + x_offset + y_offset`
+The grid version uses a separate data format:
+- input frames `768x432`
+- sequence of `5` RGB frames
+- annotations in the form of `grid confidence + x_offset + y_offset`
 
-Подготовка train:
+Prepare train:
 
 ```bash
 uv run src/video_to_heatmap.py \
@@ -20,7 +20,7 @@ uv run src/video_to_heatmap.py \
   --force
 ```
 
-Подготовка test/val:
+Prepare test/val:
 
 ```bash
 uv run src/video_to_heatmap.py \
@@ -30,13 +30,13 @@ uv run src/video_to_heatmap.py \
   --force
 ```
 
-После этого данные будут лежать в:
+After that, the data will be located in:
 - `datasets/grid_prepare/train`
 - `datasets/grid_prepare/test`
 
-### 2. Запуск обучения grid-модели
+### 2. Start training the grid model
 
-Базовый запуск:
+Basic run:
 
 ```bash
 uv run src/train_grid.py \
@@ -49,22 +49,22 @@ uv run src/train_grid.py \
   --workers 4
 ```
 
-Короткий пример через shell-скрипт:
+Short example using a shell script:
 
 ```bash
 bash run_grid.sh
 ```
 
-Результаты обучения сохраняются в `outputs/VballNetGridV1a_seq5_<timestamp>/`:
+Training results are saved in `outputs/VballNetGridV1a_seq5_<timestamp>/`:
 - `config.json`
 - `checkpoints/latest.pth`
 - `checkpoints/best.pth`
 
-### 3. Продолжить обучение с чекпоинта
+### 3. Resume training from a checkpoint
 
-`train_grid.py` поддерживает `--resume`.
+`train_grid.py` supports `--resume`.
 
-Пример продолжения с лучшего чекпоинта:
+Example of resuming from the best checkpoint:
 
 ```bash
 uv run src/train_grid.py \
@@ -78,15 +78,15 @@ uv run src/train_grid.py \
   --workers 4
 ```
 
-Как это работает:
-- из `--resume` загружаются веса модели
-- если есть, загружается состояние optimizer
-- обучение продолжается со следующей эпохи
-- новое сохранение идёт в новую папку в `outputs/`
+How it works:
+- model weights are loaded from `--resume`
+- optimizer state is loaded if available
+- training continues from the next epoch
+- new outputs are saved into a new folder in `outputs/`
 
-### 4. Инференс grid-модели
+### 4. Grid model inference
 
-Пример запуска предсказания:
+Example prediction run:
 
 ```bash
 uv run src/predict_grid.py \
@@ -95,7 +95,7 @@ uv run src/predict_grid.py \
   --video_path datasets/test/match5/video/pobead_4m-2w_1place_00004.mp4
 ```
 
-### 5. Экспорт grid-модели в ONNX
+### 5. Export the grid model to ONNX
 
 ```bash
 uv run src/model/vballnet_grid_v1a.py \

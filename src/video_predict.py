@@ -161,7 +161,7 @@ def postprocess_output(output, threshold=0.55):
     return results
 
 def visualize_heatmaps(output, seq=9):
-    # Показывает только центральную тепловую карту (для seq=9 — это 5 кадр, индекс 4)
+    # Shows only the central heatmap (for seq=9, this is frame 5, index 4)
     center_idx = seq // 2
     center_idx = seq - 1 
     heatmap = output[center_idx, :, :]
@@ -180,9 +180,9 @@ def draw_track(frame, track_points, current_color=(0, 0, 255), history_color=(25
         if point is None:
             continue
         if idx == center_idx:
-            cv2.circle(frame, point, 10, center_color, -1)  # центральный зелёный радиус 6
+            cv2.circle(frame, point, 10, center_color, -1)  # central green marker
         elif idx == seq-1:
-            cv2.circle(frame, point, 10, current_color, -1) # последний (текущий) — красный
+            cv2.circle(frame, point, 10, current_color, -1) # last (current) frame in red
         else:
             cv2.circle(frame, point, 5, history_color, -1)
     return frame
@@ -277,7 +277,7 @@ def main():
                     # When in debug mode, we keep the original BGR frame to overlay heatmap on
                     # Otherwise, convert to grayscale for visualization
                     if not args.debug:
-                        # Преобразование в grayscale
+                        # Convert to grayscale
                         vis_frame = cv2.cvtColor(vis_frame, cv2.COLOR_BGR2GRAY)
                         vis_frame = cv2.cvtColor(vis_frame, cv2.COLOR_GRAY2BGR)
 
@@ -299,7 +299,7 @@ def main():
                             break
 
                     if out_writer is not None:
-                        # Для VideoWriter нужен 3-канальный формат
+                        # VideoWriter requires a 3-channel format
                         # Check if vis_frame is already 3-channel (due to heatmap overlay)
                         if len(vis_frame.shape) == 3 and vis_frame.shape[2] == 3:
                             out_writer.write(vis_frame)
@@ -321,4 +321,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

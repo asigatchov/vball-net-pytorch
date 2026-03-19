@@ -14,16 +14,16 @@ def rearrange_tensor(input_tensor, order):
 
 def power_normalization(input, scale, threshold):
     """
-    Улучшенная power_normalization.
-    Преобразует разность кадров в карту внимания через сигмоиду.
+    Improved power_normalization.
+    Converts frame differences into an attention map via a sigmoid.
     """
     return torch.sigmoid(scale * (torch.abs(input) - threshold))
 
 
 class MotionPrompt(nn.Module):
     """
-    Улучшенный MotionPrompt с поддержкой stateful ONNX.
-    Теперь принимает h0 и возвращает hn.
+    Improved MotionPrompt with stateful ONNX support.
+    Now accepts h0 and returns hn.
     """
 
     def __init__(
@@ -34,11 +34,11 @@ class MotionPrompt(nn.Module):
         self.lambda1 = penalty_weight
         self.hidden_size = gru_hidden_size
 
-        # --- Улучшенная нормализация ---
-        self.scale = nn.Parameter(torch.tensor(5.0))  # крутизна
-        self.threshold = nn.Parameter(torch.tensor(0.6))  # порог
+        # --- Improved normalization ---
+        self.scale = nn.Parameter(torch.tensor(5.0))  # steepness
+        self.threshold = nn.Parameter(torch.tensor(0.6))  # threshold
 
-        # --- GRU для временной динамики ---
+        # --- GRU for temporal dynamics ---
         self.gru = nn.GRU(
             input_size=gru_hidden_size,
             hidden_size=gru_hidden_size,
@@ -46,16 +46,16 @@ class MotionPrompt(nn.Module):
             batch_first=True,
         )
 
-        # --- Сжатие пространства ---
+        # --- Spatial compression ---
         self.pool = nn.MaxPool2d(kernel_size=16, stride=16)  # 288x512 -> 18x32
         self.pooled_height, self.pooled_width = 288 // 16, 512 // 16  # 18, 32
         self.feature_dim = self.pooled_height * self.pooled_width  # 576
 
-        # --- Линейные слои ---
+        # --- Linear layers ---
         self.linear_reduce = nn.Linear(self.feature_dim, gru_hidden_size)
         self.linear_expand = nn.Linear(gru_hidden_size, self.feature_dim)
 
-        # --- Восстановление разрешения ---
+        # --- Resolution restoration ---
         self.upsample = nn.Upsample(
             size=(288, 512), mode="bilinear", align_corners=False
         )
@@ -74,12 +74,12 @@ class MotionPrompt(nn.Module):
         device = video_seq.device
         loss = torch.tensor(0.0, device=device)
 
-        # --- Нормализация ---
+        # --- Normalization ---
         norm_seq = video_seq # * 0.225 + 0.45
 
         B, T, H, W = norm_seq.shape
 
-        # --- Центральные разности ---
+        # --- Central differences ---
         frame_diffs = []
         for t in range(T):
             if t == 0:
@@ -91,21 +91,21 @@ class MotionPrompt(nn.Module):
             frame_diffs.append(diff)
         frame_diffs = torch.stack(frame_diffs, dim=1)  # (B, T, H, W)
 
-        # --- Подготовка к GRU ---
+        # --- Prepare input for GRU ---
         x = frame_diffs.reshape(B * T, 1, H, W)  # (B*T, 1, 288, 512)
         x = self.pool(x)  # (B*T, 1, 18, 32)
         x = x.reshape(B * T, -1)  # (B*T, 576)
         x = self.linear_reduce(x)  # (B*T, hidden_size)
         x = x.reshape(B, T, -1)  # (B, T, hidden_size)
 
-        # --- GRU с h0 ---
+        # --- GRU with h0 ---
         # For ONNX export compatibility, we need to handle the case where h0 might be None
         if h0 is None:
             gru_out, hn = self.gru(x)
         else:
             gru_out, hn = self.gru(x, h0)  # hn: (1, B, hidden_size)
 
-        # --- Восстановление пространственной структуры ---
+        # --- Restore spatial structure ---
         x = gru_out.reshape(B * T, -1)  # (B*T, hidden_size)
         x = self.linear_expand(x)  # (B*T, 576)
         x = x.reshape(
@@ -114,7 +114,7 @@ class MotionPrompt(nn.Module):
         x = self.upsample(x)  # (B*T, 1, 288, 512)
         x = x.reshape(B, T, H, W)  # (B, T, 288, 512)
 
-        # --- Улучшенная power_normalization ---
+        # --- Improved power_normalization ---
         attention_map = torch.sigmoid(self.scale * (torch.abs(x) - self.threshold))
 
         # --- Temporal loss ---
@@ -127,7 +127,7 @@ class MotionPrompt(nn.Module):
         return attention_map, loss, hn
 
     def reset_hidden_state(self):
-        """Состояние управляется извне (через h0), этот метод можно не использовать."""
+        """State is managed externally (via h0); this method is optional."""
         pass
 
 
@@ -146,8 +146,8 @@ class FusionLayerTypeA(nn.Module):
 
 class VballNetV1c(nn.Module):
     """
-    Stateful-совместимая версия VballNetV1 для ONNX.
-    Теперь принимает h0 и возвращает hn.
+    Stateful-compatible version of VballNetV1 for ONNX.
+    Now accepts h0 and returns hn.
     """
 
     def __init__(
@@ -217,8 +217,8 @@ class VballNetV1c(nn.Module):
         # Reshape to (B, T, H, W) for MotionPrompt
         motion_input = imgs_input.view(B, C, H, W)  # Already in correct shape
 
-        # --- Motion Prompt с h0 ---
-        residual_maps, _, hn = self.motion_prompt(motion_input, h0)  # получаем hn
+        # --- Motion Prompt with h0 ---
+        residual_maps, _, hn = self.motion_prompt(motion_input, h0)  # get hn
 
         # --- Encoder ---
         x1 = self.enc1(imgs_input)

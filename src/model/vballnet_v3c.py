@@ -1,8 +1,8 @@
 # vball_net_v3_fixed.py
-# Полная переработка — исправленная и аккуратная версия
-# - temporal block: сохраняет временную размерность и корректно агрегирует
-# - fusion: проекция attention (T -> out_dim) через 1x1 conv
-# - smoothness loss: вычисляется внутри MotionPromptLayer и доступна через get_extra_losses()
+# Full rewrite - cleaned up and corrected version
+# - temporal block: preserves temporal resolution and aggregates correctly
+# - fusion: attention projection (T -> out_dim) via 1x1 conv
+# - smoothness loss: computed inside MotionPromptLayer and exposed via get_extra_losses()
 
 import torch
 import torch.nn as nn
@@ -10,10 +10,10 @@ import torch.nn.functional as F
 
 
 def power_normalization(x: torch.Tensor, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """Нелинейность, адаптированная для PyTorch.
+    """Nonlinearity adapted for PyTorch.
 
     x: (...)
-    a, b: скаляры (Parameters)
+    a, b: scalar parameters
     """
     abs_x = torch.abs(x)
     denom = 0.45 * torch.abs(torch.tanh(a)) + 1e-1
@@ -22,11 +22,11 @@ def power_normalization(x: torch.Tensor, a: torch.Tensor, b: torch.Tensor) -> to
 
 
 class MotionPromptLayer(nn.Module):
-    """Motion prompt с обучаемыми a/b и встроенной smoothness loss.
+    """Motion prompt with trainable a/b and built-in smoothness loss.
 
-    Вход: x (B, T, H, W) — grayscale clip.
-    Возвращает: attention (B, T, H, W).
-    Smoothness loss доступна через get_loss().
+    Input: x (B, T, H, W) - grayscale clip.
+    Returns: attention (B, T, H, W).
+    Smoothness loss is available through get_loss().
     """
 
     def __init__(self, num_frames: int, penalty_weight: float = 1e-4):
@@ -35,17 +35,17 @@ class MotionPromptLayer(nn.Module):
         self.penalty_weight = penalty_weight
         self.a = nn.Parameter(torch.ones(1))
         self.b = nn.Parameter(torch.zeros(1))
-        # Храним последнее значение smoothness loss (тензор или None)
+        # Store the latest smoothness loss value (tensor or None)
         self._smoothness_loss = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Ожидаем x: (B, T, H, W)
-        # Сдвиг/scale как в оригинале
+        # Expect x: (B, T, H, W)
+        # Shift/scale as in the original
         x = x * 0.225 + 0.45
 
         T = self.num_frames
         diffs = []
-        # Обрабатываем пограничные случаи безопасно
+        # Handle edge cases safely
         for t in range(T):
             if T == 1:
                 diff = x[:, 0] * 0.0
@@ -59,10 +59,10 @@ class MotionPromptLayer(nn.Module):
 
         attention = torch.stack(diffs, dim=1)  # (B, T, H, W)
 
-        # Smoothness penalty между соседними временными картами
+        # Smoothness penalty between neighboring temporal maps
         if self.training and self.penalty_weight > 0:
             smoothness = torch.mean((attention[:, 1:] - attention[:, :-1]) ** 2)
-            # Сохраняем тензор, чтобы он вошёл в граф обучения (градиенты через a/b)
+            # Keep the tensor in the training graph (gradients flow through a/b)
             self._smoothness_loss = self.penalty_weight * smoothness
         else:
             self._smoothness_loss = None
@@ -74,9 +74,9 @@ class MotionPromptLayer(nn.Module):
 
 
 class FusionLayerTypeA(nn.Module):
-    """Проекция attention (T -> out_dim) через 1x1 conv и фьюзинг с features.
+    """Project attention (T -> out_dim) via 1x1 conv and fuse with features.
 
-    Вход:
+    Input:
       - features: (B, out_dim, H, W)
       - attention: (B, T, H, W)
     """
@@ -85,9 +85,9 @@ class FusionLayerTypeA(nn.Module):
         super().__init__()
         self.num_frames = num_frames
         self.out_dim = out_dim
-        # Проекция attention: Conv2d(T -> out_dim, kernel=1)
+        # Attention projection: Conv2d(T -> out_dim, kernel=1)
         self.att_proj = nn.Conv2d(num_frames, out_dim, kernel_size=1, bias=True)
-        # Инициализация
+        # Initialization
         nn.init.kaiming_normal_(self.att_proj.weight, mode='fan_out', nonlinearity='relu')
         if self.att_proj.bias is not None:
             nn.init.constant_(self.att_proj.bias, 0.0)
@@ -95,16 +95,16 @@ class FusionLayerTypeA(nn.Module):
     def forward(self, features: torch.Tensor, attention: torch.Tensor) -> torch.Tensor:
         # features: (B, out_dim, H, W)
         # attention: (B, T, H, W)
-        # Проецируем attention
+        # Project attention
         att_proj = self.att_proj(attention)  # (B, out_dim, H, W)
         weights = torch.sigmoid(att_proj)
         return features * weights
 
 
 class VballNetV3c(nn.Module):
-    """Гибкая VBallNet v3 — аккуратная и совместимая версия.
+    """Flexible VBallNet v3 - clean and compatible version.
 
-    in_dim — число входных кадров; out_dim — число выходных heatmap'ов.
+    in_dim - number of input frames; out_dim - number of output heatmaps.
     """
 
     def __init__(self, height: int = 288, width: int = 512, in_dim: int = 9, out_dim: int = 9):
@@ -115,13 +115,13 @@ class VballNetV3c(nn.Module):
         self.width = width
 
         # --- Temporal Conv3D ---
-        # out_channels = 10 → center(1) + temporal(10) = 11 каналов, как раньше
+        # out_channels = 10 -> center(1) + temporal(10) = 11 channels, as before
         self.temporal_conv3d = nn.Conv3d(
             in_channels=1,
             out_channels=10,
             kernel_size=(3, 3, 3),
             stride=1,
-            padding=(1, 1, 1),  # сохраняем временное разрешение
+            padding=(1, 1, 1),  # preserve temporal resolution
             bias=False,
         )
         self.temporal_bn = nn.BatchNorm3d(10)
@@ -169,13 +169,13 @@ class VballNetV3c(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """x: (B, in_dim, H, W)"""
         B, C, H, W = x.shape
-        assert C == self.in_dim, f"Ожидалось {self.in_dim} каналов, получено {C}"
+        assert C == self.in_dim, f"Expected {self.in_dim} channels, got {C}"
 
-        # Приводим к (B, T, H, W)
+        # Convert to (B, T, H, W)
         x = x.view(B, self.in_dim, H, W)
         T = self.in_dim
 
-        # Детачим вход для motion prompt, чтобы градиенты через пиксели не текли
+        # Detach input for motion prompt so gradients do not flow through pixels
         orig_clip = x.detach()
 
         # === Temporal 3D extractor ===
@@ -184,11 +184,11 @@ class VballNetV3c(nn.Module):
         temporal = self.temporal_bn(temporal)
         temporal = F.relu(temporal, inplace=True)
 
-        # Агрегация по времени — заменена на простой mean по временной оси
+        # Temporal aggregation replaced with a simple mean over the time axis
         temporal = torch.mean(temporal, dim=2, keepdim=True)  # (B, 10, 1, H, W)
         temporal = temporal.squeeze(2)  # (B, 10, H, W)
 
-        # === Центральный кадр ===
+        # === Center frame ===
         center_idx = T // 2
         center = x[:, center_idx:center_idx + 1, :, :]  # (B,1,H,W)
 
@@ -233,7 +233,7 @@ class VballNetV3c(nn.Module):
         return losses
 
 
-# ====================== Тест/пример использования ======================
+# ====================== Test / usage example ======================
 if __name__ == "__main__":
     import argparse
     
@@ -276,16 +276,16 @@ if __name__ == "__main__":
 
     print("Extra losses (train):", model.get_extra_losses())
 
-    # Проверка inference/eval
+    # Inference/eval check
     model.eval()
     with torch.no_grad():
         y = model(x)
     print("Eval OK. Output range:", float(y.min()), float(y.max()))
 
-    # Экспорт в ONNX (опционально)
+    # Export to ONNX (optional)
     try:
         if args.model_path:
-            # Сохраняем ONNX рядом с моделью, заменяя расширение на .onnx
+            # Save ONNX next to the model, replacing the extension with .onnx
             import os
             onnx_filename = os.path.splitext(args.model_path)[0] + ".onnx"
         else:

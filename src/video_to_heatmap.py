@@ -37,7 +37,7 @@ TARGET_HEIGHT = 288
 GRID_TARGET_WIDTH = 768
 GRID_TARGET_HEIGHT = 432
 
-# Форматы сохранения
+# Output formats
 FORMAT_PNG_GRAYSCALE = 'PNG_GRAYSCALE'
 DEFAULT_IMAGE_FORMAT = FORMAT_PNG_GRAYSCALE
 JPEG_QUALITY = 95
@@ -267,12 +267,12 @@ def process_video_sequence(video_path, annotation_path, inputs_output_dir, heatm
                     heatmap = np.zeros((TARGET_HEIGHT, TARGET_WIDTH), dtype=np.uint8)
 
 
-                # Сохраняем кадры и тепловые карты в PNG (градации серого)
+                # Save frames and heatmaps as PNG (grayscale)
                 # Use continuous numbering for output frames
                 frame_output_path = os.path.join(sequence_inputs_dir, f"{output_frame_index}.png")
                 heatmap_output_path = os.path.join(sequence_heatmaps_dir, f"{output_frame_index}.png")
 
-                # Кадр переводим в оттенки серого
+                # Convert frame to grayscale
                 processed_frame_gray = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2GRAY)
                 cv2.imwrite(frame_output_path, processed_frame_gray)
                 cv2.imwrite(heatmap_output_path, heatmap)
@@ -667,7 +667,7 @@ Annotation Format (rally1_ball.csv):
         help="Output dataset mode"
     )
 
-    # (Опционально) аргумент для формата сохранения
+    # Optional argument for the output format
     parser.add_argument(
         "--format",
         choices=[FORMAT_PNG_GRAYSCALE],
