@@ -39,7 +39,7 @@ def parse_args():
         "--batch_size",
         type=int,
         default=1,
-        help="Number of sliding windows to infer per ONNX call; CPU often works best with 1",
+        help="Number of non-overlapping clips to infer per ONNX call; CPU often works best with 1",
     )
     parser.add_argument("--threshold", type=float, default=0.5, help="Confidence threshold")
     return parser.parse_args()
@@ -196,7 +196,7 @@ def make_clip_batch(clips, grayscale):
 
 
 def flush_pending(
-    pending_frames,
+    pending_clips,
     session,
     input_name,
     seq,
@@ -211,15 +211,15 @@ def flush_pending(
     visualize,
     track,
 ):
-    if not pending_frames:
+    if not pending_clips:
         return 0.0, 0
 
-    clips = make_clip_batch([item["clip"] for item in pending_frames], grayscale=grayscale)
+    clips = make_clip_batch([item["processed_frames"] for item in pending_clips], grayscale=grayscale)
     start_infer = time.perf_counter()
     output = session.run(None, {input_name: clips})[0]
     infer_elapsed = time.perf_counter() - start_infer
 
-    predictions = decode_last_predictions(
+    batch_predictions = decode_predictions(
         output,
         seq=seq,
         threshold=threshold,
@@ -229,58 +229,67 @@ def flush_pending(
         input_height=input_height,
     )
 
-    for item, prediction in zip(pending_frames, predictions, strict=True):
-        visibility, x_orig, y_orig, _ = prediction
-        if visibility:
-            track.append((x_orig, y_orig))
-        else:
-            if track:
-                track.popleft()
-
-        append_to_csv(csv_writer, item["frame_index"], visibility, x_orig, y_orig)
-
-        if writer or visualize:
-            vis_frame = draw_track(item["frame"].copy(), track)
+    num_predictions = 0
+    for item, predictions in zip(pending_clips, batch_predictions, strict=True):
+        for frame_index, frame, prediction in zip(
+            item["frame_indices"],
+            item["frames"],
+            predictions,
+            strict=True,
+        ):
+            visibility, x_orig, y_orig, _ = prediction
             if visibility:
-                cv2.circle(vis_frame, (x_orig, y_orig), 12, (0, 255, 0), 2)
-            if writer:
-                writer.write(vis_frame)
-            if visualize:
-                cv2.imshow("Grid Prediction ONNX", vis_frame)
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    raise KeyboardInterrupt
+                track.append((x_orig, y_orig))
+            else:
+                if track:
+                    track.popleft()
 
-    pending_frames.clear()
-    return infer_elapsed, len(predictions)
+            append_to_csv(csv_writer, frame_index, visibility, x_orig, y_orig)
+
+            if writer or visualize:
+                vis_frame = draw_track(frame.copy(), track)
+                if visibility:
+                    cv2.circle(vis_frame, (x_orig, y_orig), 12, (0, 255, 0), 2)
+                if writer:
+                    writer.write(vis_frame)
+                if visualize:
+                    cv2.imshow("Grid Prediction ONNX", vis_frame)
+                    if cv2.waitKey(1) & 0xFF == ord("q"):
+                        raise KeyboardInterrupt
+            num_predictions += 1
+
+    pending_clips.clear()
+    return infer_elapsed, num_predictions
 
 
-def decode_last_predictions(output, seq, threshold, frame_width, frame_height, input_width, input_height):
+def decode_predictions(output, seq, threshold, frame_width, frame_height, input_width, input_height):
     output = output.reshape(output.shape[0], seq, 3, GRID_ROWS, GRID_COLS)
-    output = output[:, -1]
-
-    results = []
+    batch_results = []
     for batch_index in range(output.shape[0]):
-        conf_grid = output[batch_index, 0]
-        x_offset_grid = output[batch_index, 1]
-        y_offset_grid = output[batch_index, 2]
+        clip_results = []
+        for frame_idx in range(seq):
+            conf_grid = output[batch_index, frame_idx, 0]
+            x_offset_grid = output[batch_index, frame_idx, 1]
+            y_offset_grid = output[batch_index, frame_idx, 2]
 
-        max_conf_val = float(np.max(conf_grid))
-        pred_row, pred_col = np.unravel_index(np.argmax(conf_grid), conf_grid.shape)
-        if max_conf_val < threshold:
-            results.append((0, -1, -1, max_conf_val))
-            continue
+            max_conf_val = float(np.max(conf_grid))
+            pred_row, pred_col = np.unravel_index(np.argmax(conf_grid), conf_grid.shape)
+            if max_conf_val < threshold:
+                clip_results.append((0, -1, -1, max_conf_val))
+                continue
 
-        x_offset = float(x_offset_grid[pred_row, pred_col])
-        y_offset = float(y_offset_grid[pred_row, pred_col])
-        x_pred = (x_offset + pred_col) * (input_width / GRID_COLS)
-        y_pred = (y_offset + pred_row) * (input_height / GRID_ROWS)
-        x_pred = int(np.clip(x_pred, 0, input_width - 1))
-        y_pred = int(np.clip(y_pred, 0, input_height - 1))
-        x_orig = int(x_pred * frame_width / input_width)
-        y_orig = int(y_pred * frame_height / input_height)
-        results.append((1, x_orig, y_orig, max_conf_val))
+            x_offset = float(x_offset_grid[pred_row, pred_col])
+            y_offset = float(y_offset_grid[pred_row, pred_col])
+            x_pred = (x_offset + pred_col) * (input_width / GRID_COLS)
+            y_pred = (y_offset + pred_row) * (input_height / GRID_ROWS)
+            x_pred = int(np.clip(x_pred, 0, input_width - 1))
+            y_pred = int(np.clip(y_pred, 0, input_height - 1))
+            x_orig = int(x_pred * frame_width / input_width)
+            y_orig = int(y_pred * frame_height / input_height)
+            clip_results.append((1, x_orig, y_orig, max_conf_val))
 
-    return results
+        batch_results.append(clip_results)
+    return batch_results
 
 
 def draw_track(frame, track_points):
@@ -291,6 +300,20 @@ def draw_track(frame, track_points):
     if points and points[-1] is not None:
         cv2.circle(frame, points[-1], 8, (0, 0, 255), -1)
     return frame
+
+
+def render_empty_prediction(frame, frame_index, csv_writer, writer, visualize, track):
+    if track:
+        track.popleft()
+    append_to_csv(csv_writer, frame_index, 0, -1, -1)
+    if writer or visualize:
+        vis_frame = draw_track(frame.copy(), track)
+        if writer:
+            writer.write(vis_frame)
+        if visualize:
+            cv2.imshow("Grid Prediction ONNX", vis_frame)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                raise KeyboardInterrupt
 
 
 def main():
@@ -315,13 +338,15 @@ def main():
     writer, _ = setup_output_writer(basename, output_dir, frame_width, frame_height, fps, args.only_csv)
     csv_file, csv_writer = setup_csv_file(basename, output_dir)
 
-    processed_buffer = deque(maxlen=seq)
-    pending_frames = []
+    current_frames = []
+    current_processed_frames = []
+    pending_clips = []
     track = deque(maxlen=args.track_length)
     frame_index = 0
     total_start = time.perf_counter()
     inference_time = 0.0
-    inference_windows = 0
+    inference_clips = 0
+    inference_predictions = 0
 
     pbar = tqdm(total=total_frames, desc="Processing", unit="frame")
     try:
@@ -330,25 +355,24 @@ def main():
             if not ret:
                 break
 
-            processed = preprocess_frame(frame, input_width, input_height, grayscale)
-            processed_buffer.append(processed)
+            current_frames.append(frame.copy())
+            current_processed_frames.append(preprocess_frame(frame, input_width, input_height, grayscale))
 
-            if len(processed_buffer) < seq:
-                visibility = 0
-                x_orig, y_orig = -1, -1
-                if track:
-                    track.popleft()
-            else:
-                pending_frames.append(
+            if len(current_frames) == seq:
+                start_frame_index = frame_index - seq + 1
+                pending_clips.append(
                     {
-                        "frame_index": frame_index,
-                        "frame": frame.copy(),
-                        "clip": list(processed_buffer),
+                        "frame_indices": list(range(start_frame_index, frame_index + 1)),
+                        "frames": current_frames,
+                        "processed_frames": current_processed_frames,
                     }
                 )
-                if len(pending_frames) >= batch_size:
+                current_frames = []
+                current_processed_frames = []
+                if len(pending_clips) >= batch_size:
+                    num_clips = len(pending_clips)
                     infer_elapsed, num_predictions = flush_pending(
-                        pending_frames=pending_frames,
+                        pending_clips=pending_clips,
                         session=session,
                         input_name=input_name,
                         seq=seq,
@@ -364,30 +388,16 @@ def main():
                         track=track,
                     )
                     inference_time += infer_elapsed
-                    inference_windows += num_predictions
-                visibility = None
-                x_orig = None
-                y_orig = None
-
-            if visibility is not None:
-                append_to_csv(csv_writer, frame_index, visibility, x_orig, y_orig)
-                if writer or visualize:
-                    vis_frame = draw_track(frame.copy(), track)
-                    if visibility:
-                        cv2.circle(vis_frame, (x_orig, y_orig), 12, (0, 255, 0), 2)
-                    if writer:
-                        writer.write(vis_frame)
-                    if visualize:
-                        cv2.imshow("Grid Prediction ONNX", vis_frame)
-                        if cv2.waitKey(1) & 0xFF == ord("q"):
-                            return
+                    inference_clips += num_clips
+                    inference_predictions += num_predictions
 
             frame_index += 1
             pbar.update(1)
 
-        if pending_frames:
+        if pending_clips:
+            num_clips = len(pending_clips)
             infer_elapsed, num_predictions = flush_pending(
-                pending_frames=pending_frames,
+                pending_clips=pending_clips,
                 session=session,
                 input_name=input_name,
                 seq=seq,
@@ -403,7 +413,23 @@ def main():
                 track=track,
             )
             inference_time += infer_elapsed
-            inference_windows += num_predictions
+            inference_clips += num_clips
+            inference_predictions += num_predictions
+
+        if current_frames:
+            for tail_frame_index, tail_frame in zip(
+                range(frame_index - len(current_frames), frame_index),
+                current_frames,
+                strict=True,
+            ):
+                render_empty_prediction(
+                    frame=tail_frame,
+                    frame_index=tail_frame_index,
+                    csv_writer=csv_writer,
+                    writer=writer,
+                    visualize=visualize,
+                    track=track,
+                )
     finally:
         pbar.close()
         cap.release()
@@ -416,9 +442,9 @@ def main():
 
     total_time = time.perf_counter() - total_start
     pipeline_fps_frames = frame_index / total_time if total_time > 0 else 0.0
-    pipeline_fps_windows = inference_windows / total_time if total_time > 0 else 0.0
-    infer_fps_windows = inference_windows / inference_time if inference_time > 0 else 0.0
-    infer_ms_per_window = (inference_time / inference_windows * 1000.0) if inference_windows else 0.0
+    pipeline_fps_predictions = inference_predictions / total_time if total_time > 0 else 0.0
+    infer_fps_predictions = inference_predictions / inference_time if inference_time > 0 else 0.0
+    infer_ms_per_prediction = (inference_time / inference_predictions * 1000.0) if inference_predictions else 0.0
 
     print(f"Model: {model_path}")
     print(f"Providers: {session.get_providers()}")
@@ -426,13 +452,14 @@ def main():
         f"Input: seq={seq}, grayscale={grayscale}, size={input_width}x{input_height}, batch_size={batch_size}"
     )
     print(f"Processed frames: {frame_index}")
-    print(f"Inference windows: {inference_windows}")
+    print(f"Inference clips: {inference_clips}")
+    print(f"Inference predictions: {inference_predictions}")
     print(f"Total time, s: {total_time:.2f}")
     print(f"Pipeline FPS, frames/s: {pipeline_fps_frames:.2f}")
-    print(f"Pipeline FPS, windows/s: {pipeline_fps_windows:.2f}")
+    print(f"Pipeline FPS, predictions/s: {pipeline_fps_predictions:.2f}")
     print(f"Inference time, s: {inference_time:.2f}")
-    print(f"Inference FPS, windows/s: {infer_fps_windows:.2f}")
-    print(f"Inference latency, ms/window: {infer_ms_per_window:.2f}")
+    print(f"Inference FPS, predictions/s: {infer_fps_predictions:.2f}")
+    print(f"Inference latency, ms/prediction: {infer_ms_per_prediction:.2f}")
     if output_dir:
         print(f"Output dir: {output_dir}")
 

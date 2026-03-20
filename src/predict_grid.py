@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import re
 import time
 from collections import deque
 from pathlib import Path
@@ -13,6 +14,7 @@ import torch
 from tqdm import tqdm
 
 from model.vballnet_grid_v1a import VballNetGridV1a
+from model.vballnet_grid_v1b import VballNetGridV1b
 from model.vballnet_grid_v1c import VballNetGridV1c
 
 
@@ -30,7 +32,7 @@ def parse_args():
     parser.add_argument("--model_path", type=str, default=None, help="Path to .pth checkpoint")
     parser.add_argument(
         "--model_name",
-        choices=["auto", "VballNetGridV1a", "VballNetGridV1c"],
+        choices=["auto", "VballNetGridV1a", "VballNetGridV1b", "VballNetGridV1c"],
         default="auto",
         help="Model architecture to instantiate",
     )
@@ -43,7 +45,7 @@ def parse_args():
         "--batch_size",
         type=int,
         default=1,
-        help="Number of sliding windows to infer per PyTorch forward pass",
+        help="Number of non-overlapping clips to infer per PyTorch forward pass",
     )
     parser.add_argument("--threshold", type=float, default=0.5, help="Confidence threshold")
     parser.add_argument(
@@ -59,7 +61,7 @@ def infer_model_name(model_path, requested_model_name):
     if requested_model_name != "auto":
         return requested_model_name
     model_name = Path(model_path).parent.parent.parent.name.split("_seq", 1)[0]
-    if model_name not in {"VballNetGridV1a", "VballNetGridV1c"}:
+    if model_name not in {"VballNetGridV1a", "VballNetGridV1b", "VballNetGridV1c"}:
         raise ValueError(
             "Could not infer model_name from checkpoint path. Pass --model_name explicitly."
         )
@@ -74,7 +76,7 @@ def resolve_model_path(model_path, model_name):
         return path
 
     candidates = sorted(
-        Path("outputs").glob(f"{model_name}_seq5_*/checkpoints/best.pth"),
+        Path("outputs").glob(f"{model_name}_seq*/checkpoints/best.pth"),
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
@@ -108,36 +110,49 @@ def parse_optional_bool(value, default=False):
 
 
 def infer_dims_from_state_dict(state_dict):
-    for key in ("features.0.conv.weight", "stem.block.0.weight"):
-        weight = state_dict.get(key)
-        if weight is not None:
-            in_dim = int(weight.shape[1])
-            break
-    else:
-        raise KeyError("Could not infer input channels from checkpoint state_dict")
+    conv_weights = [
+        (key, value)
+        for key, value in state_dict.items()
+        if key.endswith("weight") and getattr(value, "ndim", 0) == 4
+    ]
+    if not conv_weights:
+        raise KeyError("Could not infer input/output channels from checkpoint state_dict")
 
-    for key in ("head.weight", "head.1.weight"):
-        weight = state_dict.get(key)
-        if weight is not None:
-            out_dim = int(weight.shape[0])
-            break
+    first_key, first_weight = conv_weights[0]
+    if "depthwise" in first_key:
+        in_dim = int(first_weight.shape[0])
     else:
-        raise KeyError("Could not infer output channels from checkpoint state_dict")
+        in_dim = int(first_weight.shape[1])
 
+    _, last_weight = conv_weights[-1]
+    out_dim = int(last_weight.shape[0])
     return in_dim, out_dim
 
 
-def infer_model_params(model_path, checkpoint):
-    state_dict = checkpoint.get("model_state_dict", checkpoint)
-    inferred_in_dim, inferred_out_dim = infer_dims_from_state_dict(state_dict)
-    inferred_grayscale = inferred_in_dim % 3 != 0
-    inferred_seq = inferred_in_dim if inferred_grayscale else inferred_in_dim // 3
+def infer_params_from_path(model_path):
+    run_dir_name = model_path.parents[1].name
+    seq_match = re.search(r"_seq(\d+)", run_dir_name)
+    if not seq_match:
+        return None
 
+    seq = int(seq_match.group(1))
+    grayscale = "_grayscale" in run_dir_name.lower()
+    return {
+        "seq": seq,
+        "grayscale": grayscale,
+        "input_height": INPUT_HEIGHT,
+        "input_width": INPUT_WIDTH,
+        "grid_rows": GRID_ROWS,
+        "grid_cols": GRID_COLS,
+    }
+
+
+def infer_model_params(model_path, checkpoint):
     config_path = model_path.parents[1] / "config.json"
     if config_path.exists():
         with config_path.open() as f:
             config = json.load(f)
-        seq = int(config.get("seq", inferred_seq))
+        seq = int(config["seq"])
         grayscale = parse_optional_bool(config.get("grayscale"), default=False)
         height = int(config.get("height", INPUT_HEIGHT))
         width = int(config.get("width", INPUT_WIDTH))
@@ -152,6 +167,14 @@ def infer_model_params(model_path, checkpoint):
             "grid_cols": grid_cols,
         }
 
+    path_params = infer_params_from_path(model_path)
+    if path_params is not None:
+        return path_params
+
+    state_dict = checkpoint.get("model_state_dict", checkpoint)
+    inferred_in_dim, inferred_out_dim = infer_dims_from_state_dict(state_dict)
+    inferred_grayscale = inferred_in_dim % 3 != 0
+    inferred_seq = inferred_in_dim if inferred_grayscale else inferred_in_dim // 3
     in_dim = inferred_in_dim
     out_dim = inferred_out_dim
     grayscale = inferred_grayscale
@@ -174,6 +197,7 @@ def infer_model_params(model_path, checkpoint):
 def load_model(model_path, model_name, device):
     model_cls = {
         "VballNetGridV1a": VballNetGridV1a,
+        "VballNetGridV1b": VballNetGridV1b,
         "VballNetGridV1c": VballNetGridV1c,
     }[model_name]
     checkpoint = torch.load(model_path, map_location=device)
@@ -271,17 +295,6 @@ def preprocess_frame(frame, input_width, input_height, grayscale):
         return gray.astype(np.float32) / 255.0
     rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
     return rgb.astype(np.float32) / 255.0
-
-
-def make_input_tensor(frame_buffer, device, grayscale):
-    if grayscale:
-        stacked = np.stack(frame_buffer, axis=0)
-    else:
-        stacked = np.concatenate([np.transpose(frame, (2, 0, 1)) for frame in frame_buffer], axis=0)
-    tensor = torch.from_numpy(stacked).unsqueeze(0).float().to(device)
-    return tensor
-
-
 def make_clip_batch(clips, device, grayscale):
     batch = []
     for clip_frames in clips:
@@ -328,8 +341,27 @@ def draw_track(frame, track_points):
     return frame
 
 
+def render_prediction(frame, visibility, x_orig, y_orig, writer, visualize, track):
+    if visibility:
+        track.append((x_orig, y_orig))
+    else:
+        if track:
+            track.popleft()
+
+    if writer or visualize:
+        vis_frame = draw_track(frame.copy(), track)
+        if visibility:
+            cv2.circle(vis_frame, (x_orig, y_orig), 12, (0, 255, 0), 2)
+        if writer:
+            writer.write(vis_frame)
+        if visualize:
+            cv2.imshow("Grid Prediction", vis_frame)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                raise KeyboardInterrupt
+
+
 def flush_pending(
-    pending_frames,
+    pending_clips,
     model,
     device,
     seq,
@@ -346,16 +378,17 @@ def flush_pending(
     visualize,
     track,
 ):
-    if not pending_frames:
+    if not pending_clips:
         return 0.0, 0
 
-    input_batch = make_clip_batch([item["clip"] for item in pending_frames], device, grayscale)
+    input_batch = make_clip_batch([item["processed_frames"] for item in pending_clips], device, grayscale)
     start_infer = time.perf_counter()
     with torch.inference_mode():
         output_batch = model(input_batch).detach().cpu().numpy()
     infer_elapsed = time.perf_counter() - start_infer
 
-    for item, output in zip(pending_frames, output_batch, strict=True):
+    num_predictions = 0
+    for item, output in zip(pending_clips, output_batch, strict=True):
         predictions = decode_predictions(
             output,
             threshold,
@@ -365,33 +398,25 @@ def flush_pending(
             input_width,
             input_height,
         )
-        visibility, x_resized, y_resized, _ = predictions[-1]
-
-        if visibility:
-            x_orig = int(x_resized * frame_width / input_width)
-            y_orig = int(y_resized * frame_height / input_height)
-            track.append((x_orig, y_orig))
-        else:
-            x_orig, y_orig = -1, -1
-            if track:
-                track.popleft()
-
-        result = {"Frame": item["frame_index"], "Visibility": visibility, "X": x_orig, "Y": y_orig}
-        append_to_csv(result, csv_path)
-
-        if writer or visualize:
-            vis_frame = draw_track(item["frame"].copy(), track)
+        for frame_index, frame, prediction in zip(
+            item["frame_indices"],
+            item["frames"],
+            predictions,
+            strict=True,
+        ):
+            visibility, x_resized, y_resized, _ = prediction
             if visibility:
-                cv2.circle(vis_frame, (x_orig, y_orig), 12, (0, 255, 0), 2)
-            if writer:
-                writer.write(vis_frame)
-            if visualize:
-                cv2.imshow("Grid Prediction", vis_frame)
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    raise KeyboardInterrupt
+                x_orig = int(x_resized * frame_width / input_width)
+                y_orig = int(y_resized * frame_height / input_height)
+            else:
+                x_orig, y_orig = -1, -1
 
-    num_predictions = len(pending_frames)
-    pending_frames.clear()
+            result = {"Frame": frame_index, "Visibility": visibility, "X": x_orig, "Y": y_orig}
+            append_to_csv(result, csv_path)
+            render_prediction(frame, visibility, x_orig, y_orig, writer, visualize, track)
+            num_predictions += 1
+
+    pending_clips.clear()
     return infer_elapsed, num_predictions
 
 
@@ -412,13 +437,15 @@ def main():
     writer, _ = setup_output_writer(basename, output_dir, frame_width, frame_height, fps, args.only_csv)
     csv_path = setup_csv_file(basename, output_dir)
 
-    processed_buffer = deque(maxlen=model_params["seq"])
-    pending_frames = []
+    current_frames = []
+    current_processed_frames = []
+    pending_clips = []
     track = deque(maxlen=args.track_length)
     frame_index = 0
     total_start = time.perf_counter()
     inference_time = 0.0
-    inference_windows = 0
+    inference_clips = 0
+    inference_predictions = 0
 
     pbar = tqdm(total=total_frames, desc="Processing", unit="frame")
     try:
@@ -427,7 +454,8 @@ def main():
             if not ret:
                 break
 
-            processed_buffer.append(
+            current_frames.append(frame.copy())
+            current_processed_frames.append(
                 preprocess_frame(
                     frame,
                     model_params["input_width"],
@@ -436,28 +464,21 @@ def main():
                 )
             )
 
-            if len(processed_buffer) < model_params["seq"]:
-                result = {"Frame": frame_index, "Visibility": 0, "X": -1, "Y": -1}
-                append_to_csv(result, csv_path)
-                if writer or args.visualize:
-                    vis_frame = draw_track(frame.copy(), track)
-                    if writer:
-                        writer.write(vis_frame)
-                    if args.visualize:
-                        cv2.imshow("Grid Prediction", vis_frame)
-                        if cv2.waitKey(1) & 0xFF == ord("q"):
-                            return
-            else:
-                pending_frames.append(
+            if len(current_frames) == model_params["seq"]:
+                start_frame_index = frame_index - model_params["seq"] + 1
+                pending_clips.append(
                     {
-                        "frame_index": frame_index,
-                        "frame": frame.copy(),
-                        "clip": list(processed_buffer),
+                        "frame_indices": list(range(start_frame_index, frame_index + 1)),
+                        "frames": current_frames,
+                        "processed_frames": current_processed_frames,
                     }
                 )
-                if len(pending_frames) >= batch_size:
+                current_frames = []
+                current_processed_frames = []
+                if len(pending_clips) >= batch_size:
+                    num_clips = len(pending_clips)
                     infer_elapsed, num_predictions = flush_pending(
-                        pending_frames=pending_frames,
+                        pending_clips=pending_clips,
                         model=model,
                         device=device,
                         seq=model_params["seq"],
@@ -475,14 +496,16 @@ def main():
                         track=track,
                     )
                     inference_time += infer_elapsed
-                    inference_windows += num_predictions
+                    inference_clips += num_clips
+                    inference_predictions += num_predictions
 
             frame_index += 1
             pbar.update(1)
 
-        if pending_frames:
+        if pending_clips:
+            num_clips = len(pending_clips)
             infer_elapsed, num_predictions = flush_pending(
-                pending_frames=pending_frames,
+                pending_clips=pending_clips,
                 model=model,
                 device=device,
                 seq=model_params["seq"],
@@ -500,7 +523,26 @@ def main():
                 track=track,
             )
             inference_time += infer_elapsed
-            inference_windows += num_predictions
+            inference_clips += num_clips
+            inference_predictions += num_predictions
+
+        if current_frames:
+            for tail_frame_index, tail_frame in zip(
+                range(frame_index - len(current_frames), frame_index),
+                current_frames,
+                strict=True,
+            ):
+                result = {"Frame": tail_frame_index, "Visibility": 0, "X": -1, "Y": -1}
+                append_to_csv(result, csv_path)
+                render_prediction(
+                    tail_frame,
+                    visibility=0,
+                    x_orig=-1,
+                    y_orig=-1,
+                    writer=writer,
+                    visualize=args.visualize,
+                    track=track,
+                )
     finally:
         pbar.close()
         cap.release()
@@ -511,9 +553,9 @@ def main():
 
     total_time = time.perf_counter() - total_start
     pipeline_fps_frames = frame_index / total_time if total_time > 0 else 0.0
-    pipeline_fps_windows = inference_windows / total_time if total_time > 0 else 0.0
-    infer_fps_windows = inference_windows / inference_time if inference_time > 0 else 0.0
-    infer_ms_per_window = (inference_time / inference_windows * 1000.0) if inference_windows else 0.0
+    pipeline_fps_predictions = inference_predictions / total_time if total_time > 0 else 0.0
+    infer_fps_predictions = inference_predictions / inference_time if inference_time > 0 else 0.0
+    infer_ms_per_prediction = (inference_time / inference_predictions * 1000.0) if inference_predictions else 0.0
 
     print(f"Model: {model_path}")
     print(f"Architecture: {model_name}")
@@ -524,13 +566,14 @@ def main():
         f"batch_size={batch_size}"
     )
     print(f"Processed frames: {frame_index}")
-    print(f"Inference windows: {inference_windows}")
+    print(f"Inference clips: {inference_clips}")
+    print(f"Inference predictions: {inference_predictions}")
     print(f"Total time, s: {total_time:.2f}")
     print(f"Pipeline FPS, frames/s: {pipeline_fps_frames:.2f}")
-    print(f"Pipeline FPS, windows/s: {pipeline_fps_windows:.2f}")
+    print(f"Pipeline FPS, predictions/s: {pipeline_fps_predictions:.2f}")
     print(f"Inference time, s: {inference_time:.2f}")
-    print(f"Inference FPS, windows/s: {infer_fps_windows:.2f}")
-    print(f"Inference latency, ms/window: {infer_ms_per_window:.2f}")
+    print(f"Inference FPS, predictions/s: {infer_fps_predictions:.2f}")
+    print(f"Inference latency, ms/prediction: {infer_ms_per_prediction:.2f}")
     if output_dir:
         print(f"Output dir: {output_dir}")
 

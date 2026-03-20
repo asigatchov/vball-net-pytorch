@@ -16,6 +16,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from model.vballnet_grid_v1a import VballNetGridV1a
+from model.vballnet_grid_v1b import VballNetGridV1b
 from model.vballnet_grid_v1c import VballNetGridV1c
 from utils.grid_dataset import GridSequenceDataset
 
@@ -47,7 +48,7 @@ def parse_args():
     parser.add_argument("--out", type=str, default="outputs")
     parser.add_argument(
         "--model_name",
-        choices=["VballNetGridV1a", "VballNetGridV1c"],
+        choices=["VballNetGridV1a", "VballNetGridV1b", "VballNetGridV1c"],
         default="VballNetGridV1a",
     )
     parser.add_argument("--name", type=str, default=None)
@@ -63,6 +64,7 @@ def parse_args():
 def build_model(model_name, height, width, seq, grayscale):
     model_cls = {
         "VballNetGridV1a": VballNetGridV1a,
+        "VballNetGridV1b": VballNetGridV1b,
         "VballNetGridV1c": VballNetGridV1c,
     }[model_name]
     in_dim = seq if grayscale else seq * 3
