@@ -71,7 +71,7 @@ class MotionPrompt(nn.Module):
 
         # Stack into attention and direction maps
         residual_maps = torch.stack(pos_maps, dim=1)  # Shape: (B, T, H, W)
-        #residual_maps = torch.stack([pos_norm + neg_norm], dim=1)  # общая активность
+        #residual_maps = torch.stack([pos_norm + neg_norm], dim=1)  # overall activity
         direction_maps = torch.stack([torch.stack(pos_maps, dim=1), torch.stack(neg_maps, dim=1)], dim=2)  # Shape: (B, T, 2, H, W)
 
         if self.training:

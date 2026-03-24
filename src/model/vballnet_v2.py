@@ -5,10 +5,10 @@ import argparse
 import os
 
 
-# --- Утилиты ---
+# --- Utilities ---
 def rearrange_tensor(input_tensor, order="BTCHW"):
     """
-    Перестановка размерностей тензора: из любого порядка B,C,H,W,T → BTCHW.
+    Reorder tensor dimensions from any B,C,H,W,T order to BTCHW.
     """
     order = order.upper()
     perm = [order.index(dim) for dim in "BTCHW"]
@@ -17,7 +17,7 @@ def rearrange_tensor(input_tensor, order="BTCHW"):
 
 def power_normalization(input_tensor, a, b):
     """
-    Power normalization для motion attention (как в оригинальной TF-версии).
+    Power normalization for motion attention (as in the original TF version).
     """
     return 1 / (1 + torch.exp(-(5 / (0.45 * torch.abs(torch.tanh(a)) + 1e-1)) *
                               (torch.abs(input_tensor) - 0.6 * torch.tanh(b))))
@@ -26,8 +26,8 @@ def power_normalization(input_tensor, a, b):
 # --- Depthwise Separable Convolution Block ---
 class DepthwiseSeparableConv(nn.Module):
     """
-    Depthwise (groups=in_channels) + Pointwise (1x1) свёртка.
-    Замена обычного Conv2d(3x3) для значительного снижения параметров.
+    Depthwise (groups=in_channels) + pointwise (1x1) convolution.
+    Replaces regular Conv2d(3x3) to significantly reduce parameter count.
     """
     def __init__(self, in_ch, out_ch, stride=1):
         super().__init__()
@@ -44,7 +44,7 @@ class DepthwiseSeparableConv(nn.Module):
         return x
 
 
-# --- Spatial Attention Module (как в TF-версии) ---
+# --- Spatial Attention Module (as in the TF version) ---
 class SpatialAttention(nn.Module):
     """
     CBAM-like spatial attention:
@@ -115,7 +115,7 @@ class MotionPrompt(nn.Module):
         attention_map = torch.stack(attention_maps, dim=1)  # (B, T, H, W)
 
         if self.training and self.lambda1 > 0:
-            norm_att = attention_map.unsqueeze(2)  # для temporal loss
+            norm_att = attention_map.unsqueeze(2)  # for temporal loss
             temp_diff = norm_att[:, 1:] - norm_att[:, :-1]
             B, T, _, H, W = grayscale_seq.shape
             temporal_loss = torch.sum(temp_diff ** 2) / (H * W * (T - 1) * B)
@@ -124,7 +124,7 @@ class MotionPrompt(nn.Module):
         return attention_map, loss
 
 
-# --- Fusion Layer Type A (по-кадровое умножение) ---
+# --- Fusion Layer Type A (frame-wise multiplication) ---
 class FusionLayerTypeA(nn.Module):
     def __init__(self, num_frames, out_dim):
         super().__init__()
@@ -133,11 +133,11 @@ class FusionLayerTypeA(nn.Module):
 
     def forward(self, feature_map, attention_map):
         # feature_map: (B, out_dim, H, W), attention_map: (B, T, H, W)
-        # Берём attention для каждого кадра
+        # Take attention for each frame
         return feature_map * attention_map[:, :self.out_dim]
 
 
-# --- Улучшенная VballNetV1a ---
+# --- Improved VballNetV1a ---
 class VballNetV2(nn.Module):
     def __init__(self, height=288, width=512, in_dim=15, out_dim=15):
         super().__init__()
@@ -149,7 +149,7 @@ class VballNetV2(nn.Module):
         self.motion_prompt = MotionPrompt(num_frames=num_frames, mode=mode)
         self.fusion_layer = FusionLayerTypeA(num_frames=num_frames, out_dim=out_dim)
 
-        # Encoder с DepthwiseSeparableConv
+        # Encoder with DepthwiseSeparableConv
         self.enc1 = DepthwiseSeparableConv(in_dim, 32)
         self.enc1_1 = DepthwiseSeparableConv(32, 32)
         self.pool1 = nn.MaxPool2d(2, stride=2)
@@ -159,7 +159,7 @@ class VballNetV2(nn.Module):
 
         self.enc3 = DepthwiseSeparableConv(64, 128)
 
-        # Spatial Attention в bottleneck (как в TF-версии)
+        # Spatial Attention in the bottleneck (as in the TF version)
         self.spatial_attention = SpatialAttention(kernel_size=7)
 
         # Decoder
@@ -195,7 +195,7 @@ class VballNetV2(nn.Module):
         x = self.pool2(x2)
 
         x = self.enc3(x)
-        x = self.spatial_attention(x)   # ← добавлено!
+        x = self.spatial_attention(x)   # added
 
         # Decoder
         x = self.up1(x)
@@ -213,19 +213,19 @@ class VballNetV2(nn.Module):
         return x
 
 
-# --- Main блок ---
+# --- Main block ---
 if __name__ == "__main__":
     height, width = 288, 512
-    in_dim, out_dim = 15, 15  # дефолт: 15 grayscale кадров → 15 heatmaps
+    in_dim, out_dim = 15, 15  # default: 15 grayscale frames -> 15 heatmaps
 
     model = VballNetV2(height=height, width=width, in_dim=in_dim, out_dim=out_dim)
 
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Модель VballNetV2 инициализирована")
-    print(f"Параметры: {total_params:,} (ожидается ~120–150k благодаря DepthwiseSeparable)")
+    print("VballNetV2 model initialized")
+    print(f"Parameters: {total_params:,} (expected ~120-150k thanks to DepthwiseSeparable)")
 
-    # Тестовый прогон
-    device = torch.device("cpu")  # для стабильности экспорта
+    # Test forward pass
+    device = torch.device("cpu")  # for export stability
     model.to(device)
     model.eval()
 
@@ -236,14 +236,14 @@ if __name__ == "__main__":
         print(f"Output shape: {output.shape}")
         print(f"Output range: [{output.min().item():.3f}, {output.max().item():.3f}]")
 
-    # Аргументы для экспорта
-    parser = argparse.ArgumentParser(description='VballNetV2 → ONNX экспорт')
+    # Export arguments
+    parser = argparse.ArgumentParser(description='VballNetV2 -> ONNX export')
     parser.add_argument('--model_path', type=str, default=None,
-                        help='Путь к обученному чекпоинту (.pth). Если указан — загрузить и экспортировать в ONNX')
+                        help='Path to a trained checkpoint (.pth). If provided, load and export it to ONNX')
     args = parser.parse_args()
 
     if args.model_path:
-        print(f"Загрузка весов из: {args.model_path}")
+        print(f"Loading weights from: {args.model_path}")
         try:
             # Load checkpoint with weights_only=False to handle various checkpoint formats
             checkpoint = torch.load(args.model_path, map_location=device, weights_only=False)
@@ -253,13 +253,13 @@ if __name__ == "__main__":
                 model.load_state_dict(checkpoint['model_state_dict'])
             else:
                 model.load_state_dict(checkpoint)
-            print("Веса успешно загружены")
+            print("Weights loaded successfully")
         except Exception as e:
-            print(f"Ошибка загрузки: {e}")
+            print(f"Load error: {e}")
             exit(1)
 
         onnx_path = os.path.splitext(args.model_path)[0] + ".onnx"
-        print(f"Экспорт в ONNX: {onnx_path}")
+        print(f"Exporting to ONNX: {onnx_path}")
 
         try:
             torch.onnx.export(
@@ -276,10 +276,10 @@ if __name__ == "__main__":
                 # Disable dynamo to avoid potential conversion issues
                 dynamo=False
             )
-            print("ONNX модель успешно сохранена!")
+            print("ONNX model saved successfully")
         except Exception as e:
-            print(f"Ошибка экспорта ONNX: {e}")
+            print(f"ONNX export error: {e}")
             import traceback
             traceback.print_exc()
     else:
-        print("Запуск без --model_path → только тест инициализации. Для экспорта укажите путь к чекпоинту.")
+        print("Running without --model_path -> initialization test only. Provide a checkpoint path to export.")

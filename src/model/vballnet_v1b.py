@@ -4,12 +4,12 @@ import torch.nn.functional as F
 import numpy as np
 
 
-# --- Утилиты ---
+# --- Utilities ---
 def get_center_of_mass(heatmap):
     """
-    Вычисляет центр массы по тепловой карте.
+    Computes the center of mass from a heatmap.
     heatmap: (H, W) or (B, H, W)
-    Возвращает: (x, y) координаты в пикселях
+    Returns: (x, y) coordinates in pixels
     """
     if heatmap.dim() == 3:
         B, H, W = heatmap.shape
@@ -24,7 +24,7 @@ def get_center_of_mass(heatmap):
                 cx = (xx * mass).sum() / total_mass
                 cy = (yy * mass).sum() / total_mass
             else:
-                cx = cy = -1  # мяч не найден
+                cx = cy = -1  # ball not found
             coords.append([cx, cy])
         return torch.tensor(coords, device=heatmap.device)  # (B, 2)
     else:
@@ -40,14 +40,14 @@ def get_center_of_mass(heatmap):
         return torch.tensor([-1., -1.], device=heatmap.device)
 
 
-# --- Функция для создания гауссова ядра ---
+# --- Function to create a Gaussian kernel ---
 def gaussian_kernel(kernel_size=5, sigma=1.0, device='cpu'):
     """
-    Создает 2D гауссово ядро для свертки.
-    kernel_size: размер ядра (нечетное число)
-    sigma: стандартное отклонение гауссианы
-    device: устройство для тензора
-    Возвращает: тензор (1, 1, kernel_size, kernel_size)
+    Creates a 2D Gaussian kernel for convolution.
+    kernel_size: kernel size (odd number)
+    sigma: standard deviation of the Gaussian
+    device: tensor device
+    Returns: tensor of shape (1, 1, kernel_size, kernel_size)
     """
     x = torch.arange(-kernel_size // 2 + 1., kernel_size // 2 + 1., device=device)
     x = x.repeat(kernel_size, 1)
@@ -56,7 +56,7 @@ def gaussian_kernel(kernel_size=5, sigma=1.0, device='cpu'):
     gaussian = gaussian / gaussian.sum()
     return gaussian.view(1, 1, kernel_size, kernel_size)
 
-# --- Enhanced MotionPrompt (векторизованная, ONNX-совместимая) ---
+# --- Enhanced MotionPrompt (vectorized, ONNX-compatible) ---
 class EnhancedMotionPrompt2(nn.Module):
     def __init__(self, num_frames, kernel_size=5, sigma=1.0):
         super().__init__()
@@ -64,73 +64,73 @@ class EnhancedMotionPrompt2(nn.Module):
         self.kernel_size = kernel_size
         self.sigma = sigma
 
-        # Создаём гауссово ядро и сохраняем как буфер
+        # Create a Gaussian kernel and store it as a buffer
         self.register_buffer('gaussian_kernel', gaussian_kernel(kernel_size, sigma))
 
-        # Параметры для адаптивной активации
-        self.a = nn.Parameter(torch.tensor(1.0))  # масштаб
-        self.b = nn.Parameter(torch.tensor(0.0))  # смещение
+        # Parameters for adaptive activation
+        self.a = nn.Parameter(torch.tensor(1.0))  # scale
+        self.b = nn.Parameter(torch.tensor(0.0))  # bias
 
     def forward(self, video_seq):
         # video_seq: (B, T, H, W)
         B, T, H, W = video_seq.shape
 
-        # Применяем гауссово размытие ко всем кадрам
+        # Apply Gaussian blur to all frames
         blurred = F.conv2d(
             video_seq.view(B * T, 1, H, W),
             self.gaussian_kernel,
             padding=self.kernel_size // 2
         ).view(B, T, H, W)
 
-        # --- Векторизованное вычисление разностей ---
-        # Центральные разности: (blurred[:, t+1] - blurred[:, t-1]) / 2
+        # --- Vectorized difference computation ---
+        # Central differences: (blurred[:, t+1] - blurred[:, t-1]) / 2
         if T == 1:
-            # Крайний случай: один кадр
+            # Edge case: a single frame
             diff = torch.zeros_like(blurred)
         else:
-            # Сдвиг вперёд: t+1 (для t=0..T-2), последний кадр дублируется
+            # Forward shift: t+1 (for t=0..T-2), duplicate the last frame
             next_frames = torch.cat([blurred[:, 1:], blurred[:, -1:]], dim=1)  # (B, T, H, W)
-            # Сдвиг назад: t-1 (для t=1..T-1), первый кадр дублируется
+            # Backward shift: t-1 (for t=1..T-1), duplicate the first frame
             prev_frames = torch.cat([blurred[:, :1], blurred[:, :-1]], dim=1)  # (B, T, H, W)
-            # Центральная разность
+            # Central difference
             diff = 0.5 * (next_frames - prev_frames)
 
-        # Модуль разности
+        # Difference magnitude
         mag = torch.abs(diff)
 
-        # Адаптивная сигмоида: усиливает значимые изменения
+        # Adaptive sigmoid: amplifies significant changes
         motion_maps = torch.sigmoid(self.a * (mag - self.b))
 
         return motion_maps, None  # (B, T, H, W)
 
 
-# --- Enhanced MotionPrompt (ONNX-совместимая версия) ---
+# --- Enhanced MotionPrompt (ONNX-compatible version) ---
 class EnhancedMotionPrompt(nn.Module):
     def __init__(self, num_frames, kernel_size=5, sigma=1.0):
         super().__init__()
         self.num_frames = num_frames
         self.kernel_size = kernel_size
         self.sigma = sigma
-        # Регистрируем гауссово ядро как буфер
+        # Register the Gaussian kernel as a buffer
         self.register_buffer('gaussian_kernel', gaussian_kernel(kernel_size, sigma))
-        # Обучаемые параметры a и b для сигмоиды
-        self.a = nn.Parameter(torch.tensor(1.0))  # масштабирующий коэффициент
-        self.b = nn.Parameter(torch.tensor(0.0))  # смещение
+        # Trainable sigmoid parameters a and b
+        self.a = nn.Parameter(torch.tensor(1.0))  # scaling factor
+        self.b = nn.Parameter(torch.tensor(0.0))  # bias
 
     def forward(self, video_seq):
         # video_seq: (B, T, H, W)
         B, T, H, W = video_seq.shape
-        # Применяем гауссову свертку
+        # Apply Gaussian convolution
         blurred = F.conv2d(
             video_seq.view(B * T, 1, H, W),
             self.gaussian_kernel,
             padding=self.kernel_size // 2
         ).view(B, T, H, W)
 
-        # Вычисляем разницу между кадрами
+        # Compute frame differences
         motion_maps = []
         for t in range(T):
-            # Для первого и последнего кадра используем соседние кадры
+            # Use neighboring frames for the first and last frame
             prev_idx = torch.clamp(torch.tensor(t - 1, device=video_seq.device), 0, T - 1)
             next_idx = torch.clamp(torch.tensor(t + 1, device=video_seq.device), 0, T - 1)
             diff = 0.5 * (blurred[:, next_idx] - blurred[:, prev_idx])
@@ -210,14 +210,14 @@ class VballNetV1b(nn.Module):
         # ASPP
         self.aspp = ASPP(128, 128)
 
-        # Decoder с deep supervision
+        # Decoder with deep supervision
         self.up1 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
         self.dec1 = self._conv_block(128 + 64, 64)
-        self.supervision1 = nn.Conv2d(64, out_dim, kernel_size=1)  # выход 1
+        self.supervision1 = nn.Conv2d(64, out_dim, kernel_size=1)  # output 1
 
         self.up2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
         self.dec2 = self._conv_block(64 + 32, 32)
-        self.supervision2 = nn.Conv2d(32, out_dim, kernel_size=1)  # выход 2
+        self.supervision2 = nn.Conv2d(32, out_dim, kernel_size=1)  # output 2
 
         # Final output
         self.final_conv = nn.Conv2d(32, out_dim, kernel_size=1)
@@ -251,7 +251,7 @@ class VballNetV1b(nn.Module):
         x = self.enc3(x)  # (B, 128, H//4, W//4)
         x = self.aspp(x)
 
-        # Decoder с deep supervision
+        # Decoder with deep supervision
         x = self.up1(x)  # (B, 128, H//2, W//2)
         x = torch.cat([x, x2], dim=1)
         x = self.dec1(x)
@@ -266,11 +266,11 @@ class VballNetV1b(nn.Module):
         # Final output
         final = self.final_conv(x)  # (B, 9, H, W)
 
-        # Финальная фьюзия движения
+        # Final motion fusion
         final = self.fusion_layer(final, motion_maps)
         out2 = self.fusion_layer(out2, motion_maps)
 
-        # Deep supervision: суммируем все выходы
+        # Deep supervision: sum all outputs
         fused_output = final + out2 + out1_up
         output = torch.sigmoid(fused_output)
 
@@ -278,8 +278,8 @@ class VballNetV1b(nn.Module):
 
     def predict_centers(self, x, threshold=0.3):
         """
-        Предсказать центры мяча для всех 9 кадров.
-        Возвращает: (B, 9, 2) — (x, y) координаты или (-1, -1) если нет мяча.
+        Predict ball centers for all 9 frames.
+        Returns: (B, 9, 2) - (x, y) coordinates or (-1, -1) if the ball is absent.
         """
         with torch.no_grad():
             heatmaps = self.forward(x)  # (B, 9, H, W)
@@ -305,10 +305,10 @@ if __name__ == "__main__":
     parser.add_argument('--model_path', type=str, help='Path to the trained model checkpoint')
     args = parser.parse_args()
 
-    # Инициализация модели
+    # Model initialization
     height, width = 288, 512
     
-    # Определение параметров из имени файла модели
+    # Infer parameters from the model filename
     in_dim, out_dim = 15, 15
     if args.model_path:
         import os
@@ -319,7 +319,7 @@ if __name__ == "__main__":
             if match:
                 seq_len = int(match.group(1))
                 in_dim, out_dim = seq_len, seq_len
-                print(f"Определены параметры из имени файла: in_dim={in_dim}, out_dim={out_dim}")
+                print(f"Parameters inferred from filename: in_dim={in_dim}, out_dim={out_dim}")
     
     model = VballNetV1b(height=height, width=width, in_dim=in_dim, out_dim=out_dim)
 
@@ -345,17 +345,17 @@ if __name__ == "__main__":
             print(f"Failed to load model: {e}")
             exit(1)
 
-    # Перевод модели в режим оценки
+    # Switch model to evaluation mode
     model.eval()
 
-    # Создание примера входных данных
+    # Create example input data
     dummy_input = torch.randn(1, in_dim, height, width).to(device)
-    print(f"Используются параметры: in_dim={in_dim}, out_dim={out_dim}")
+    print(f"Using parameters: in_dim={in_dim}, out_dim={out_dim}")
 
-    # Проверка модели на примере
+    # Run a sample forward pass
     with torch.no_grad():
         output = model(dummy_input)
-        print(f"Output shape: {output.shape}")  # Ожидается: torch.Size([1, out_dim, 288, 512])
+        print(f"Output shape: {output.shape}")  # Expected: torch.Size([1, out_dim, 288, 512])
 
     # Export to ONNX if model_path is provided
     if args.model_path:
@@ -382,7 +382,7 @@ if __name__ == "__main__":
             import traceback
             traceback.print_exc()
     else:
-        # Экспорт модели в ONNX (по умолчанию)
+        # Export the model to ONNX (default behavior)
         onnx_path = "vballnet_v2.onnx"
         try:
             torch.onnx.export(

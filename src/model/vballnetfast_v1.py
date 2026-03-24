@@ -49,8 +49,8 @@ class Single2DConv(nn.Module):
 
 class CompactMotionGate(nn.Module):
     """
-    Усиливает компактное движение (мяч),
-    подавляет протяжённое движение (руки).
+    Emphasizes compact motion (the ball),
+    suppresses extended motion (arms).
     """
     def __init__(self, num_frames):
         super().__init__()

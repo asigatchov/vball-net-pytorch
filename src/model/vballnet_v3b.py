@@ -1,7 +1,7 @@
 # vball_net_v3_pytorch_flexible.py
-# Профессиональная PyTorch-реализация (один файл, легко масштабируется)
-# Поддерживает произвольное количество входных и выходных кадров
-# ≥90–120 FPS на CPU через ONNX → OpenVINO (FP16)
+# Production-ready PyTorch implementation (single file, easy to scale)
+# Supports arbitrary numbers of input and output frames
+# >=90-120 FPS on CPU via ONNX -> OpenVINO (FP16)
 
 import torch
 import torch.nn as nn
@@ -9,7 +9,7 @@ import torch.nn.functional as F
 
 
 def power_normalization(x, a, b):
-    """Оригинальная нелинейность из TF-версии"""
+    """Original nonlinearity from the TF version."""
     abs_x = torch.abs(x)
     denom = 0.45 * torch.abs(torch.tanh(a)) + 1e-1
     scale = 5.0 / denom
@@ -17,7 +17,7 @@ def power_normalization(x, a, b):
 
 
 class MotionPromptLayer(nn.Module):
-    """Улучшенный motion prompt с обучаемыми a/b и smoothness penalty"""
+    """Improved motion prompt with trainable a/b and a smoothness penalty."""
     def __init__(self, num_frames, penalty_weight=1e-4):
         super().__init__()
         self.num_frames = num_frames
@@ -26,8 +26,8 @@ class MotionPromptLayer(nn.Module):
         self.b = nn.Parameter(torch.zeros(1))
 
     def forward(self, x):
-        # x: (B, T, H, W) — grayscale клип
-        x = x * 0.225 + 0.45  # как в оригинале
+        # x: (B, T, H, W) - grayscale clip
+        x = x * 0.225 + 0.45  # same as the original
 
         diffs = []
         T = self.num_frames
@@ -61,7 +61,7 @@ class MotionPromptLayer(nn.Module):
 
 
 class FusionLayerTypeA(nn.Module):
-    """Простое поэлементное умножение с attention (как в оригинале)"""
+    """Simple element-wise multiplication with attention (same as the original)."""
     def __init__(self, num_frames, out_dim):
         super().__init__()
         self.num_frames = num_frames
@@ -84,25 +84,25 @@ class FusionLayerTypeA(nn.Module):
 
 class VballNetV3b(nn.Module):
     """
-    Гибкая версия VBallNet v3
-    in_dim  — количество входных кадров (например 9, 15, 21)
-    out_dim — количество выходных heatmaps (обычно = in_dim)
+    Flexible VBallNet v3 version.
+    in_dim  - number of input frames (for example 9, 15, 21)
+    out_dim - number of output heatmaps (usually equal to in_dim)
     """
     def __init__(self, height=288, width=512, in_dim=9, out_dim=9, fusion_layer_type="TypeA"):
         super().__init__()
-        assert fusion_layer_type == "TypeA", "Пока реализован только TypeA"
+        assert fusion_layer_type == "TypeA", "Only TypeA is currently implemented"
         self.in_dim = in_dim
         self.out_dim = out_dim
         self.height = height
         self.width = width
 
-        # 1. Лёгкий 3D depthwise temporal extractor
+        # 1. Lightweight 3D depthwise temporal extractor
         self.temporal_conv3d = nn.Conv3d(
             in_channels=1,
             out_channels=10,
             kernel_size=(3, 3, 3),
             stride=1,
-            padding=(0, 1, 1),   # только по H,W; по времени — без padding
+            padding=(0, 1, 1),   # only along H,W; no temporal padding
             bias=False,
             groups=1
         )
@@ -151,37 +151,37 @@ class VballNetV3b(nn.Module):
         x: (B, in_dim, H, W) — input tensor compatible with VballNetV1a
         """
         B, C, H, W = x.shape
-        assert C == self.in_dim, f"Ожидалось {self.in_dim} каналов, получено {C}"
+        assert C == self.in_dim, f"Expected {self.in_dim} channels, got {C}"
         
         # Reshape to (B, T, H, W) for processing
         x = x.view(B, self.in_dim, H, W)
         T = self.in_dim
 
-        orig_clip = x.detach()  # сохраняем для MotionPrompt (B, T, H, W)
+        orig_clip = x.detach()  # keep for MotionPrompt (B, T, H, W)
 
-        # === 1. Temporal feature extractor (группируем по 3 кадра) ===
-        # Делим T кадров на группы по 3 → получаем T//3 + остаток, но упростим: используем stride
-        # Более элегантно: просто делаем Conv3D с окном 3 и stride 1, потом усредняем/берём max
+        # === 1. Temporal feature extractor (group frames by 3) ===
+        # Split T frames into groups of 3 -> T//3 plus remainder, but here we simplify using stride
+        # A cleaner option is Conv3D with window 3 and stride 1, then average or take max
         x_3d = x.unsqueeze(2)  # (B, T, 1, H, W)
         x_3d = x_3d.permute(0, 2, 1, 3, 4).contiguous()  # (B, 1, T, H, W)
 
-        # Применяем 3D свёртку (временной размер T→T-2)
+        # Apply 3D convolution (temporal size T->T-2)
         temporal = self.temporal_conv3d(x_3d)           # (B, 10, T-2, H, W)
         temporal = self.temporal_bn(temporal)
         temporal = F.relu(temporal, inplace=True)
 
-        # Приводим обратно к (B, 10, H, W): берём центральный срез или усредняем
-        # В оригинале группировали по 3 → усредняли 5 групп → здесь проще:
-        # берём центр по времени (или max/mean)
+        # Bring back to (B, 10, H, W): take the center slice or average
+        # The original grouped by 3 -> averaged 5 groups -> here it is simpler:
+        # take the temporal center (or max/mean)
         mid = temporal.shape[2] // 2
         temporal = temporal[:, :, mid:mid+1, :, :].squeeze(2)  # (B, 10, H, W)
-        # Или можно F.adaptive_avg_pool3d → (B,10,1,H,W) → squeeze
+        # Or use F.adaptive_avg_pool3d -> (B,10,1,H,W) -> squeeze
 
-        # === 2. Центральный кадр ===
+        # === 2. Center frame ===
         center_idx = T // 2
         center = x[:, center_idx:center_idx+1, :, :]  # (B, 1, H, W)
 
-        # === 3. Конкатенация ===
+        # === 3. Concatenation ===
         enc_input = torch.cat([center, temporal], dim=1)  # (B, 11, H, W)
 
         # === Encoder ===
@@ -217,7 +217,7 @@ class VballNetV3b(nn.Module):
 
         return out
 
-    # Для корректного сбора лоссов (например в Lightning или своём лупе)
+    # For proper loss collection (for example in Lightning or a custom loop)
     def get_extra_losses(self):
         losses = {}
         motion_loss = self.motion_prompt.get_loss()
@@ -226,7 +226,7 @@ class VballNetV3b(nn.Module):
         return losses
 
 
-# ====================== Тест ======================
+# ====================== Test ======================
 if __name__ == "__main__":
     import argparse
     
@@ -236,7 +236,7 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Пример: 9 каналов → 9 heatmaps (совместимо с VballNetV1a)
+    # Example: 9 channels -> 9 heatmaps (compatible with VballNetV1a)
     model = VballNetV3b(
         height=288,
         width=512,
@@ -265,15 +265,15 @@ if __name__ == "__main__":
 
     print(f"Input shape : {x.shape}")
     print(f"Output shape: {y.shape}")  # Expected: [1, 9, 288, 512]
-    print(f"Параметры  : {sum(p.numel() for p in model.parameters()):,}")
+    print(f"Parameters  : {sum(p.numel() for p in model.parameters()):,}")
     
     # Test compatibility with VballNetV1a format
-    print("\n=== Тест совместимости с VballNetV1a ===")
+    print("\n=== Compatibility test with VballNetV1a ===")
     print(f"✓ Input format: (B, in_dim, H, W) = {x.shape}")
     print(f"✓ Output format: (B, out_dim, H, W) = {y.shape}")
     print(f"✓ Output range: [{y.min():.3f}, {y.max():.3f}]")
 
-    # Экспорт в ONNX (для OpenVINO)
+    # Export to ONNX (for OpenVINO)
     try:
         onnx_filename = "vball_net_v3b_trained.onnx" if args.model_path else "vball_net_v3b_random.onnx"
         torch.onnx.export(
@@ -285,6 +285,6 @@ if __name__ == "__main__":
             output_names=["heatmaps"],
             dynamic_axes={"clip": {0: "B"}, "heatmaps": {0: "B"}}
         )
-        print(f"\n✓ ONNX сохранён как {onnx_filename} → используй: mo --input_model {onnx_filename} --data_type FP16")
+        print(f"\nONNX saved as {onnx_filename} -> use: mo --input_model {onnx_filename} --data_type FP16")
     except Exception as e:
-        print(f"\nОшибка экспорта ONNX: {e}")
+        print(f"\nONNX export error: {e}")

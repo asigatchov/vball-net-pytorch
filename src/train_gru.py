@@ -174,7 +174,7 @@ class Trainer:
         print("Setting up output directories...")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         suffix = "_resumed" if self.args.resume else ""
-        # Формируем составное имя модели для папки и чекпоинтов
+        # Build a composite model name for the folder and checkpoints
         model_tag = f"{self.args.model_name}_seq{self.args.seq}" + ("_grayscale" if self.args.grayscale else "")
         self.save_dir = Path(self.args.out) / f"{model_tag}{suffix}_{timestamp}"
         self.save_dir.mkdir(parents=True, exist_ok=True)
@@ -395,7 +395,7 @@ class Trainer:
     def save_checkpoint(self, epoch, train_loss, val_loss, is_emergency=False):
         print("Saving checkpoint...")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        # Формируем составное имя модели для чекпоинта
+        # Build a composite model name for the checkpoint
         model_tag = f"{self.args.model_name}_seq{self.args.seq}" + ("_grayscale" if self.args.grayscale else "")
         checkpoint = {
             "epoch": epoch,
@@ -517,9 +517,9 @@ class Trainer:
         vis_dir = self.save_dir / "val_vis"
 
         vis_dir.mkdir(exist_ok=True)
-        max_vis_batches = 5  # Сколько батчей визуализировать
+        max_vis_batches = 5  # Number of batches to visualize
         use_gru = hasattr(self.model, '_model_type') and self.model._model_type in ["VballNetV1c", "VballNetFastV2"]
-        h0 = None  # Начальное состояние GRU
+        h0 = None  # Initial GRU state
         with torch.no_grad():
             val_pbar = tqdm(total=len(self.val_loader), desc="Validation", ncols=100)
             for batch_idx, (inputs, targets) in enumerate(self.val_loader):
@@ -554,39 +554,39 @@ class Trainer:
                 total_f1_center += float(batch_f1_center)
                 total_acc_center += float(batch_acc_center)
 
-                # Для анализа качества последовательности — считаем по всем
+                # For sequence quality analysis, compute metrics over all frames
                 batch_f1_all, batch_acc_all = self._calculate_metrics(outputs, targets, mode="all")
                 total_f1_all += float(batch_f1_all)
                 total_acc_all += float(batch_acc_all)
 
-                # --- Визуализация ---
+                # --- Visualization ---
                 if batch_idx < max_vis_batches:
                     # inputs: (B, C, H, W), outputs: (B, seq, H, W), targets: (B, seq, H, W)
                     inp = inputs[0].detach().cpu()  # (C, H, W)
                     pred = outputs[0].detach().cpu()  # (seq, H, W)
                     gt = targets[0].detach().cpu()   # (seq, H, W)
-                    # Определяем число кадров для визуализации
+                    # Determine the number of frames to visualize
                     n_vis = min(pred.shape[0], gt.shape[0], self.args.seq)
                     for i in range(n_vis):
-                        # Входной кадр (если grayscale - берем 1 канал, если RGB - 3)
+                        # Input frame (use 1 channel for grayscale, 3 for RGB)
                         if inp.shape[0] == pred.shape[0]:
                             # grayscale
                             rgb = np.stack([inp[i].numpy()]*3, axis=2)
                         else:
                             rgb = inp[i*3:(i+1)*3].permute(1, 2, 0).numpy()
                         rgb = (rgb * 255).astype(np.uint8)
-                        # Предсказанный heatmap
+                        # Predicted heatmap
                         pred_hm = pred[i].numpy()
                         pred_hm = (pred_hm * 255).astype(np.uint8)
                         pred_hm_color = cv2.applyColorMap(pred_hm, cv2.COLORMAP_JET)
-                        # Эталонный heatmap
+                        # Ground-truth heatmap
                         gt_hm = gt[i].numpy()
                         gt_hm = (gt_hm * 255).astype(np.uint8)
                         gt_hm_color = cv2.applyColorMap(gt_hm, cv2.COLORMAP_JET)
                         # Overlay
                         overlay_pred = cv2.addWeighted(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), 0.6, pred_hm_color, 0.4, 0)
                         overlay_gt = cv2.addWeighted(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), 0.6, gt_hm_color, 0.4, 0)
-                        # Собираем в одну картинку
+                        # Combine into a single image
                         vis_img = np.vstack([
                             cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR),
                             overlay_pred,
@@ -594,7 +594,7 @@ class Trainer:
                         ])
                         vis_path = vis_dir / f"val_batch{batch_idx}_frame{i}.jpg"
                         cv2.imwrite(str(vis_path), vis_img)
-                # --- конец визуализации ---
+                # --- end visualization ---
 
                 val_pbar.update(1)
                 val_pbar.set_postfix({"loss": f"{loss.item():.6f}"})
@@ -638,9 +638,9 @@ class Trainer:
 
     def _calculate_metrics(self, predictions, targets, mode="both"):
         """
-        mode: "center" — только центральный кадр (текущий режим)
-            "all"     — по всем кадрам последовательности
-            "both"    — возвращает оба
+        mode: "center" - only the center frame (current mode)
+            "all"     - over all frames in the sequence
+            "both"    - returns both
         """
         batch_size = predictions.size(0)
         seq_len = predictions.size(1)
@@ -648,7 +648,7 @@ class Trainer:
         f1_scores = []
         acc_scores = []
 
-        # Определяем индексы для расчёта
+        # Determine indices for the computation
         if mode == "center":
             indices = [seq_len // 2]
         elif mode == "all":
@@ -709,7 +709,7 @@ class Trainer:
             start_time = time.time()
             self.model.train()
             total_loss = 0.0
-            h0 = None  # Начальное состояние GRU
+            h0 = None  # Initial GRU state
             train_pbar = tqdm(total=len(self.train_loader), desc=f"Training", ncols=100)
             for batch_idx, (inputs, targets) in enumerate(self.train_loader):
                 if self.interrupted:

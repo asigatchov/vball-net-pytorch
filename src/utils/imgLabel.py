@@ -6,7 +6,7 @@ import argparse
 
 
 
-# Добавление парсинга аргументов командной строки
+# Add command-line argument parsing
 parser = argparse.ArgumentParser(description="Process a video file.")
 
 parser.add_argument("--video_path", type=str, help="Path to the video file")
@@ -16,7 +16,7 @@ parser.add_argument('--fullscreen', action='store_true', default=False,
                     help='Open labeling window in fullscreen mode')
 args = parser.parse_args()
 
-video_path = args.video_path  # Получение пути к видеофайлу из аргументов командной строки
+video_path = args.video_path  # Get the video file path from command-line arguments
 
 if not video_path or not os.path.isfile(video_path) or not video_path.endswith('.mp4'):
     print("Not a valid video path! Please modify path in parser.py --label_video_path")
