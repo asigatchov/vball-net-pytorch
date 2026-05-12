@@ -9,18 +9,18 @@
 #DATADIR=../TrackNetV4-PyTorch/datasets/mix_volleyball_preprocessed
 #VAL_DATADIR=../TrackNetV4-PyTorch/datasets/mix_volleyball_test_preprocessed
 #
-DATADIR=./datasets/train_preprocessed
-VAL_DATADIR=./datasets/test_preprocessed
+DATADIR=./datasets/dji/train
+VAL_DATADIR=./datasets/dji/val
 # Run training
 uv run  src/train_gru.py \
   --data "$DATADIR" \
   --val_data "$VAL_DATADIR" \
   --model_name VballNetV1c \
-  --seq 15 \
+  --seq 9 \
   --grayscale \
   --optimizer AdamW \
   --lr 0.001 \
-  --epochs 250 \
+  --epochs 1 \
   --batch 16  \
   --scheduler ReduceLROnPlateau \
   --workers 8 \

@@ -10,7 +10,7 @@ uv run src/train_grid.py \
   --model_name "$MODEL_NAME" \
   --seq 9 \
   --grayscale \
-  --epochs 60 \
+  --epochs 1 \
   --batch 8 \
   --optimizer AdamW \
   --lr 0.001 \

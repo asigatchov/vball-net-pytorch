@@ -62,10 +62,10 @@ class FrameHeatmapDataset(Dataset):
         match_dirs = sorted(
             d
             for d in self.root_dir.iterdir()
-            if d.is_dir() and d.name.startswith("match")
+            if d.is_dir()
         )
 
-        logging.info(f"Scanning {len(match_dirs)} match folders...")
+        logging.info(f"Scanning {len(match_dirs)} dataset folders...")
 
         for match_dir in match_dirs:
             items.extend(self._process_match(match_dir))
@@ -103,15 +103,21 @@ class FrameHeatmapDataset(Dataset):
         input_files = self._get_sorted_images(input_dir)
         heatmap_files = self._get_sorted_images(heatmap_dir)
 
-        if len(input_files) != len(heatmap_files) or len(input_files) < self.seq:
+        pair_count = min(len(input_files), len(heatmap_files))
+        if pair_count < self.seq:
             logging.warning(
-                f"Skipping frame {frame_name}: insufficient or mismatched files ({len(input_files)} inputs, {len(heatmap_files)} heatmaps)"
+                f"Skipping frame {frame_name}: insufficient files ({len(input_files)} inputs, {len(heatmap_files)} heatmaps)"
             )
             return []
 
+        if len(input_files) != len(heatmap_files):
+            logging.warning(
+                f"Frame {frame_name} has mismatched files ({len(input_files)} inputs, {len(heatmap_files)} heatmaps); using the shared prefix"
+            )
+
         # Generate seq-frame sequences
         logging.info(
-            f"Processing frame {frame_name} with {len(input_files)} images seq={self.seq}..."
+            f"Processing frame {frame_name} with {pair_count} image pairs seq={self.seq}..."
         )
         return [
             {
@@ -121,7 +127,7 @@ class FrameHeatmapDataset(Dataset):
                 "frame": frame_name,
                 "idx": i,
             }
-            for i in range(len(input_files) - self.seq + 1)
+            for i in range(pair_count - self.seq + 1)
         ]
     def _get_sorted_images(self, directory):
         """Get sorted image files by numeric stem"""

@@ -50,6 +50,25 @@ def is_valid_path(name):
     return name not in IGNORED_FILES and name not in IGNORED_DIRS
 
 
+def discover_sample_dirs(source_path):
+    """Return immediate subdirectories that contain both `video` and `csv`."""
+    if not os.path.exists(source_path):
+        return []
+
+    entries = [
+        item for item in os.listdir(source_path)
+        if is_valid_path(item) and os.path.isdir(os.path.join(source_path, item))
+    ]
+
+    sample_dirs = []
+    for item in entries:
+        sample_path = os.path.join(source_path, item)
+        if os.path.exists(os.path.join(sample_path, "video")) and os.path.exists(os.path.join(sample_path, "csv")):
+            sample_dirs.append(item)
+
+    return sorted(sample_dirs)
+
+
 def generate_heatmap(center_x, center_y, width=TARGET_WIDTH, height=TARGET_HEIGHT, sigma=3):
     """Generate 2D Gaussian heatmap centered at specified coordinates."""
     x_coords = np.arange(0, width)
@@ -120,28 +139,22 @@ def validate_dataset_structure(source_path):
     if not os.path.exists(source_path):
         return False, f"Source path does not exist: {source_path}"
 
-    # Discover match directories
-    entries = [item for item in os.listdir(source_path) if is_valid_path(item)]
-    match_dirs = [
-        item for item in entries
-        if item.startswith("match") and os.path.isdir(os.path.join(source_path, item))
-    ]
-
-    if not match_dirs:
-        return False, "No match directories found"
+    sample_dirs = discover_sample_dirs(source_path)
+    if not sample_dirs:
+        return False, "No dataset folders found"
 
     # Analyze structure
-    valid_matches = 0
+    valid_samples = 0
     video_count = 0
     annotation_count = 0
 
-    for match_dir in match_dirs:
-        match_path = os.path.join(source_path, match_dir)
-        annotations_path = os.path.join(match_path, "csv")
-        videos_path = os.path.join(match_path, "video")
+    for sample_dir in sample_dirs:
+        sample_path = os.path.join(source_path, sample_dir)
+        annotations_path = os.path.join(sample_path, "csv")
+        videos_path = os.path.join(sample_path, "video")
 
         if os.path.exists(annotations_path) and os.path.exists(videos_path):
-            valid_matches += 1
+            valid_samples += 1
 
             # Count annotation files
             csv_files = [f for f in os.listdir(annotations_path)
@@ -153,25 +166,21 @@ def validate_dataset_structure(source_path):
                          if f.endswith('.mp4') and is_valid_path(f)]
             video_count += len(mp4_files)
 
-    if valid_matches == 0:
-        return False, "No valid match directories found (must contain both csv and video subdirectories)"
+    if valid_samples == 0:
+        return False, "No valid dataset folders found (must contain both csv and video subdirectories)"
 
-    summary = f"Found {valid_matches} match directories, {video_count} videos, {annotation_count} annotation files"
+    summary = f"Found {valid_samples} dataset folders, {video_count} videos, {annotation_count} annotation files"
     return True, summary
 
 
 def estimate_total_frames(source_path):
     """Estimate total number of frames across all videos for progress tracking."""
     frame_total = 0
-    match_dirs = [
-        item for item in os.listdir(source_path) if is_valid_path(item)
-                                                    and item.startswith("match") and os.path.isdir(
-            os.path.join(source_path, item))
-    ]
+    sample_dirs = discover_sample_dirs(source_path)
 
-    for match_dir in match_dirs:
-        match_path = os.path.join(source_path, match_dir)
-        videos_path = os.path.join(match_path, "video")
+    for sample_dir in sample_dirs:
+        sample_path = os.path.join(source_path, sample_dir)
+        videos_path = os.path.join(sample_path, "video")
 
         if os.path.exists(videos_path):
             mp4_files = [f for f in os.listdir(videos_path)
@@ -502,30 +511,12 @@ def preprocess_dataset(source_path, output_path, sigma_value=3.0, frame_step=1, 
 
     os.makedirs(output_path, exist_ok=True)
 
-    # Discover valid match directories
-    entries = [item for item in os.listdir(source_path) if is_valid_path(item)]
-    match_dirs = [
-        item for item in entries
-        if item.startswith("match") and os.path.isdir(os.path.join(source_path, item))
-    ]
-
-    # Filter for valid match directories
-    valid_match_dirs = []
-    for match_dir_name in match_dirs:
-        match_dir_path = os.path.join(source_path, match_dir_name)
-        has_csv = os.path.exists(os.path.join(match_dir_path, "csv"))
-        has_video = os.path.exists(os.path.join(match_dir_path, "video"))
-
-        if has_csv and has_video:
-            valid_match_dirs.append(match_dir_name)
-        else:
-            print(f"⚠️ Skipping {match_dir_name}: missing csv or video directory")
-
-    if not valid_match_dirs:
-        print("❌ No valid match directories found")
+    sample_dirs = discover_sample_dirs(source_path)
+    if not sample_dirs:
+        print("❌ No valid dataset folders found")
         return False
 
-    print(f"🚀 Processing {len(valid_match_dirs)} match directories...")
+    print(f"🚀 Processing {len(sample_dirs)} dataset folders...")
 
     # Estimate total workload
     print("📊 Estimating workload...")
@@ -534,9 +525,9 @@ def preprocess_dataset(source_path, output_path, sigma_value=3.0, frame_step=1, 
 
     # Execute preprocessing with progress tracking
     with tqdm(total=total_frame_count // frame_step, desc="Processing frames", unit="frame") as progress_bar:
-        for match_dir_name in valid_match_dirs:
-            match_dir_path = os.path.join(source_path, match_dir_name)
-            process_match_directory(match_dir_path, output_path, sigma_value, frame_step, progress_bar)
+        for sample_dir_name in sample_dirs:
+            sample_dir_path = os.path.join(source_path, sample_dir_name)
+            process_match_directory(sample_dir_path, output_path, sigma_value, frame_step, progress_bar)
 
             # Memory cleanup after each match
             gc.collect()
@@ -569,25 +560,16 @@ def preprocess_grid_dataset(source_path, output_path, frame_step=1, force_overwr
 
     os.makedirs(output_path, exist_ok=True)
 
-    entries = [item for item in os.listdir(source_path) if is_valid_path(item)]
-    valid_match_dirs = [
-        item
-        for item in entries
-        if item.startswith("match")
-        and os.path.isdir(os.path.join(source_path, item))
-        and os.path.exists(os.path.join(source_path, item, "csv"))
-        and os.path.exists(os.path.join(source_path, item, "video"))
-    ]
-
-    if not valid_match_dirs:
-        print("ERROR: No valid match directories found")
+    sample_dirs = discover_sample_dirs(source_path)
+    if not sample_dirs:
+        print("ERROR: No valid dataset folders found")
         return False
 
     total_frame_count = estimate_total_frames(source_path)
     with tqdm(total=total_frame_count // frame_step, desc="Processing frames", unit="frame") as progress_bar:
-        for match_dir_name in valid_match_dirs:
-            match_dir_path = os.path.join(source_path, match_dir_name)
-            process_grid_match_directory(match_dir_path, output_path, frame_step, progress_bar)
+        for sample_dir_name in sample_dirs:
+            sample_dir_path = os.path.join(source_path, sample_dir_name)
+            process_grid_match_directory(sample_dir_path, output_path, frame_step, progress_bar)
             gc.collect()
 
     print("\nGrid preprocessing completed")

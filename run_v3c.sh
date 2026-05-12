@@ -21,11 +21,10 @@ uv run  src/train_gru.py \
   --grayscale \
   --optimizer AdamW \
   --lr 0.001 \
-  --epochs 200 \
+  --epochs 1 \
   --batch 10  \
   --scheduler ReduceLROnPlateau \
   --workers 11 \
-  --resume outputs/VballNetV2_seq9_grayscale_resumed_20251221_151901/checkpoints/VballNetV2_seq9_grayscale_best.pth \
   --alpha 0.5 
 
 echo "Training completed!"
