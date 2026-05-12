@@ -124,7 +124,7 @@ def validate_dataset_structure(source_path):
     entries = [item for item in os.listdir(source_path) if is_valid_path(item)]
     match_dirs = [
         item for item in entries
-        if item.startswith("match") and os.path.isdir(os.path.join(source_path, item))
+        if os.path.isdir(os.path.join(source_path, item))
     ]
 
     if not match_dirs:
@@ -164,9 +164,8 @@ def estimate_total_frames(source_path):
     """Estimate total number of frames across all videos for progress tracking."""
     frame_total = 0
     match_dirs = [
-        item for item in os.listdir(source_path) if is_valid_path(item)
-                                                    and item.startswith("match") and os.path.isdir(
-            os.path.join(source_path, item))
+        item for item in os.listdir(source_path)
+        if is_valid_path(item) and os.path.isdir(os.path.join(source_path, item))
     ]
 
     for match_dir in match_dirs:
@@ -506,7 +505,7 @@ def preprocess_dataset(source_path, output_path, sigma_value=3.0, frame_step=1, 
     entries = [item for item in os.listdir(source_path) if is_valid_path(item)]
     match_dirs = [
         item for item in entries
-        if item.startswith("match") and os.path.isdir(os.path.join(source_path, item))
+        if os.path.isdir(os.path.join(source_path, item))
     ]
 
     # Filter for valid match directories
@@ -573,8 +572,7 @@ def preprocess_grid_dataset(source_path, output_path, frame_step=1, force_overwr
     valid_match_dirs = [
         item
         for item in entries
-        if item.startswith("match")
-        and os.path.isdir(os.path.join(source_path, item))
+        if os.path.isdir(os.path.join(source_path, item))
         and os.path.exists(os.path.join(source_path, item, "csv"))
         and os.path.exists(os.path.join(source_path, item, "video"))
     ]

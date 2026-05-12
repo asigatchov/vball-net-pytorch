@@ -39,7 +39,7 @@ class GridSequenceDataset(Dataset):
         match_dirs = sorted(
             match_dir
             for match_dir in self.root_dir.iterdir()
-            if match_dir.is_dir() and match_dir.name.startswith("match")
+            if match_dir.is_dir() and not match_dir.name.startswith(".")
         )
         for match_dir in match_dirs:
             inputs_dir = match_dir / "inputs"

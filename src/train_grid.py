@@ -25,11 +25,13 @@ def parse_args():
     parser = argparse.ArgumentParser(description="GridTrackNet training")
     parser.add_argument("--data", type=str, required=True)
     parser.add_argument("--val_data", type=str, required=True)
+    parser.add_argument("--test_data", type=str, default=None)
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch", type=int, default=3)
     parser.add_argument("--workers", type=int, default=0)
     parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--optimizer", choices=["Adadelta", "Adam", "AdamW", "SGD"], default="Adadelta")
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--wd", type=float, default=0.0)
@@ -196,6 +198,8 @@ class Trainer:
             args.seq,
             args.grayscale,
         ).to(self.device)
+        self.use_amp = bool(args.amp and self.device.type == "cuda")
+        self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
         self.criterion = GridTrackNetLoss(seq=args.seq)
         self.optimizer = create_optimizer(args, self.model)
         self.scheduler = None
@@ -256,28 +260,45 @@ class Trainer:
             augment=False,
             grayscale=self.args.grayscale,
         )
-        self.train_loader = DataLoader(
-            train_ds,
-            batch_size=self.args.batch,
-            shuffle=True,
-            num_workers=self.args.workers,
-            pin_memory=self.device.type == "cuda",
-        )
-        self.val_loader = DataLoader(
-            val_ds,
-            batch_size=self.args.batch,
-            shuffle=False,
-            num_workers=self.args.workers,
-            pin_memory=self.device.type == "cuda",
-        )
+        test_ds = None
+        if self.args.test_data:
+            test_ds = GridSequenceDataset(
+                self.args.test_data,
+                seq=self.args.seq,
+                stride=self.args.stride,
+                height=self.args.height,
+                width=self.args.width,
+                grid_rows=self.args.grid_rows,
+                grid_cols=self.args.grid_cols,
+                augment=False,
+                grayscale=self.args.grayscale,
+            )
+
+        def make_loader(dataset, shuffle):
+            return DataLoader(
+                dataset,
+                batch_size=self.args.batch,
+                shuffle=shuffle,
+                num_workers=self.args.workers,
+                pin_memory=self.device.type == "cuda",
+            )
+
+        self.train_loader = make_loader(train_ds, shuffle=True)
+        self.val_loader = make_loader(val_ds, shuffle=False)
         if len(train_ds) == 0:
             raise RuntimeError(f"Empty training dataset: {self.args.data}")
         if len(val_ds) == 0:
             raise RuntimeError(f"Empty validation dataset: {self.args.val_data}")
         self.train_dataset = train_ds
         self.val_dataset = val_ds
+        self.test_dataset = test_ds
+        self.test_loader = make_loader(test_ds, shuffle=False) if test_ds is not None else None
         print(f"Train samples: {len(train_ds)}")
         print(f"Val samples: {len(val_ds)}")
+        if test_ds is not None:
+            if len(test_ds) == 0:
+                raise RuntimeError(f"Empty test dataset: {self.args.test_data}")
+            print(f"Test samples: {len(test_ds)}")
 
     def _run_epoch(self, loader, training):
         mode = "train" if training else "val"
@@ -291,17 +312,27 @@ class Trainer:
             targets = targets.to(self.device)
 
             with torch.set_grad_enabled(training):
-                outputs = self.model(inputs)
-                loss = self.criterion(outputs, targets)
+                if self.use_amp:
+                    with torch.autocast("cuda"):
+                        outputs = self.model(inputs)
+                        loss = self.criterion(outputs.float(), targets.float())
+                else:
+                    outputs = self.model(inputs)
+                    loss = self.criterion(outputs, targets)
                 if training:
                     self.optimizer.zero_grad()
-                    loss.backward()
-                    self.optimizer.step()
+                    if self.use_amp:
+                        self.scaler.scale(loss).backward()
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
+                    else:
+                        loss.backward()
+                        self.optimizer.step()
 
             total_loss += loss.item()
             batch_metrics = compute_metrics(
-                outputs.detach(),
-                targets.detach(),
+                outputs.detach().float(),
+                targets.detach().float(),
                 seq=self.args.seq,
                 tol=self.args.tol,
                 grid_cols=self.args.grid_cols,
@@ -434,6 +465,33 @@ class Trainer:
             self._save_val_visualizations(epoch)
 
         self.writer.close()
+        if self.test_loader is not None:
+            best_checkpoint_path = self.save_dir / "checkpoints" / "best.pth"
+            checkpoint_path = None
+            if best_checkpoint_path.exists():
+                checkpoint_path = best_checkpoint_path
+            elif self.args.resume:
+                checkpoint_path = Path(self.args.resume)
+
+            if checkpoint_path is not None and checkpoint_path.exists():
+                checkpoint = torch.load(checkpoint_path, map_location=self.device)
+                self.model.load_state_dict(checkpoint["model_state_dict"])
+                test_loss, test_metrics = self._run_epoch(self.test_loader, training=False)
+                test_summary = {
+                    "loss": test_loss,
+                    "metrics": test_metrics,
+                    "checkpoint": str(checkpoint_path),
+                }
+                with (self.save_dir / "test_metrics.json").open("w") as f:
+                    json.dump(test_summary, f, indent=2)
+                print(
+                    "Test summary "
+                    f"loss={test_loss:.4f} "
+                    f"accuracy={test_metrics['accuracy']:.4f} "
+                    f"precision={test_metrics['precision']:.4f} "
+                    f"recall={test_metrics['recall']:.4f} "
+                    f"f1={test_metrics['f1']:.4f}"
+                )
         print(f"Artifacts saved to {self.save_dir}")
 
 
