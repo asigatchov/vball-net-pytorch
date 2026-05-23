@@ -275,12 +275,18 @@ class Trainer:
             )
 
         def make_loader(dataset, shuffle):
+            loader_kwargs = {
+                "batch_size": self.args.batch,
+                "shuffle": shuffle,
+                "num_workers": self.args.workers,
+                "pin_memory": self.device.type == "cuda",
+            }
+            if self.args.workers > 0:
+                loader_kwargs["persistent_workers"] = True
+                loader_kwargs["prefetch_factor"] = 4
             return DataLoader(
                 dataset,
-                batch_size=self.args.batch,
-                shuffle=shuffle,
-                num_workers=self.args.workers,
-                pin_memory=self.device.type == "cuda",
+                **loader_kwargs,
             )
 
         self.train_loader = make_loader(train_ds, shuffle=True)

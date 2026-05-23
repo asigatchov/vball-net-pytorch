@@ -20,8 +20,22 @@ def parse_args():
 
 
 def select_counts(total, train_ratio, val_ratio, test_ratio):
-    if total < 3:
-        raise ValueError(f"Need at least 3 videos per catalog to build train/val/test splits, got {total}")
+    """Select per-catalog split counts with explicit small-catalog rules.
+
+    Rules:
+    - 1..4 videos: keep all in train
+    - 5 videos: 4 train, 1 val
+    - 6 videos: 4 train, 1 val, 1 test
+    - 7+ videos: ratio-based split with at least one sample in each split
+    """
+    if total <= 4:
+        return {"train": total, "val": 0, "test": 0}
+
+    if total == 5:
+        return {"train": 4, "val": 1, "test": 0}
+
+    if total == 6:
+        return {"train": 4, "val": 1, "test": 1}
 
     ratios = {
         "train": train_ratio,
@@ -67,7 +81,7 @@ def main():
             raise FileExistsError(f"Output root already exists: {output_root}. Use --force to replace it.")
 
     output_root.mkdir(parents=True, exist_ok=True)
-    manifest = {"seed": args.seed, "splits": {}}
+    manifest = {"seed": args.seed, "splits": {}, "skipped_catalogs": {}}
     split_roots = {name: output_root / name for name in ("train", "val", "test")}
     for split_root in split_roots.values():
         split_root.mkdir(parents=True, exist_ok=True)
@@ -85,8 +99,16 @@ def main():
         csv_paths = sorted(csv_dir.glob("*_ball.csv"))
         csv_by_stem = {path.stem.replace("_ball", ""): path for path in csv_paths}
         stems = [path.stem for path in video_paths if path.stem in csv_by_stem]
-        if len(stems) < 3:
-            raise ValueError(f"Catalog {catalog.name} has only {len(stems)} paired videos; need at least 3.")
+        if len(stems) < 1:
+            manifest["skipped_catalogs"][catalog.name] = {
+                "paired_videos": len(stems),
+                "reason": "need at least 1 paired video",
+            }
+            print(
+                f"Skipping {catalog.name}: "
+                f"only {len(stems)} paired videos found, need at least 1."
+            )
+            continue
 
         catalog_rng = random.Random(args.seed + catalog_idx)
         catalog_rng.shuffle(stems)
