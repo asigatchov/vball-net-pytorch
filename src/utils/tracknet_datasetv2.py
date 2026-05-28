@@ -62,7 +62,7 @@ class FrameHeatmapDataset(Dataset):
         match_dirs = sorted(
             d
             for d in self.root_dir.iterdir()
-            if d.is_dir() and d.name.startswith("match")
+            if d.is_dir() and (d / "inputs").exists() and (d / "heatmaps").exists()
         )
 
         logging.info(f"Scanning {len(match_dirs)} match folders...")
